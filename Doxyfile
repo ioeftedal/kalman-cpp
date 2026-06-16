@@ -1,0 +1,46 @@
+# Doxyfile 1.12.0
+
+PROJECT_NAME           = "kalman-cpp"
+PROJECT_NUMBER         = 1.0.0
+PROJECT_BRIEF          = "Unscented Kalman Filter for real-time tracking"
+OUTPUT_DIRECTORY       = docs
+INPUT                  = include/kalman \
+                         src \
+                         apps \
+                         tests \
+                         benchmarks
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp *.cpp
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+EXTRACT_LOCAL_CLASSES  = NO
+CASE_SENSE_NAMES       = YES
+INPUT_ENCODING         = UTF-8
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = NO
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+OPTIMIZE_OUTPUT_FOR_C  = NO
+TYPEDEF_HIDES_STRUCT   = NO
+EXCLUDE_SYMBOLS        =
+EXAMPLE_PATH           =
+EXAMPLE_PATTERNS       =
+EXAMPLE_RECURSIVE      = NO
+ALLEXTERNALS           = NO
+SEARCHENGINE           = YES
+SORT_MEMBER_DOCS       = YES
+SORT_BRIEF_DOCS        = NO
+JAVADOC_AUTOBRIEF      = NO
+QT_AUTOBRIEF           = NO
+MULTILINE_CPP_IS_BRIEF = NO
+INHERIT_DOCS           = YES
+SEPARATE_MEMBER_PAGES  = NO
+TAB_SIZE               = 4
+ALIASES                =
+CLANG_ASSISTED_PARSING = NO
+CLANG_ADD_INC_PATHS    = YES

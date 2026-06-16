@@ -1,0 +1,14 @@
+---
+Checks: >
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  bugprone-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -readability-identifier-length,
+  -modernize-use-trailing-return-type,
+  -readability-uppercase-literal-suffix,
+CheckOptions:
+  readability-function-cognitive-complexity.Threshold: 25
+...

@@ -1,0 +1,5 @@
+add_executable(ukf_test pan_tilt_test.cpp pixel_model_test.cpp)
+target_link_libraries(ukf_test kalman GTest::gtest_main)
+target_compile_options(ukf_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
+include(GoogleTest)
+gtest_discover_tests(ukf_test)
