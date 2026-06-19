@@ -10,8 +10,7 @@
 //  YOLODetector
 // ===========================================================================
 
-YOLODetector::YOLODetector(const std::string& model_path, float conf_threshold,
-                           float nms_threshold)
+YOLODetector::YOLODetector(const std::string& model_path, float conf_threshold, float nms_threshold)
     : conf_threshold_(conf_threshold), nms_threshold_(nms_threshold) {
   net_ = cv::dnn::readNet(model_path);
   if (net_.empty()) {
@@ -22,22 +21,18 @@ YOLODetector::YOLODetector(const std::string& model_path, float conf_threshold,
   net_.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
 }
 
-std::optional<cv::Point2f> YOLODetector::next(const cv::Mat& frame) {
+std::optional<Detection> YOLODetector::next(const cv::Mat& frame) {
   auto dets = detect(frame);
   if (dets.empty()) return std::nullopt;
-  // Return centre of highest-confidence target detection
-  const auto& best = dets.front();
-  return cv::Point2f(best.bbox.x + best.bbox.width / 2.0f,
-                     best.bbox.y + best.bbox.height / 2.0f);
+  return dets.front();
 }
 
 std::vector<Detection> YOLODetector::detect(const cv::Mat& frame) {
   // -----------------------------------------------------------------------
   //  1. Pre-process: blob from image
   // -----------------------------------------------------------------------
-  cv::Mat blob = cv::dnn::blobFromImage(frame, 1.0f / 255.0f,
-                                         cv::Size(input_width_, input_height_),
-                                         cv::Scalar(), true, false);
+  cv::Mat blob = cv::dnn::blobFromImage(frame, 1.0f / 255.0f, cv::Size(input_width_, input_height_),
+                                        cv::Scalar(), true, false);
   net_.setInput(blob);
 
   // -----------------------------------------------------------------------
@@ -99,8 +94,8 @@ std::vector<Detection> YOLODetector::detect(const cv::Mat& frame) {
     float x2 = cx + w / 2.0f;
     float y2 = cy + h / 2.0f;
 
-    boxes.emplace_back(static_cast<int>(x1), static_cast<int>(y1),
-                       static_cast<int>(x2 - x1), static_cast<int>(y2 - y1));
+    boxes.emplace_back(static_cast<int>(x1), static_cast<int>(y1), static_cast<int>(x2 - x1),
+                       static_cast<int>(y2 - y1));
     scores.push_back(max_score);
     class_ids.push_back(best_class);
   }
@@ -118,23 +113,19 @@ std::vector<Detection> YOLODetector::detect(const cv::Mat& frame) {
 
   // Sort by confidence descending
   std::sort(results.begin(), results.end(),
-            [](const Detection& a, const Detection& b) {
-              return a.confidence > b.confidence;
-            });
+            [](const Detection& a, const Detection& b) { return a.confidence > b.confidence; });
 
   return results;
 }
 
-std::vector<int> YOLODetector::nonMaxSuppression(
-    const std::vector<cv::Rect>& boxes, const std::vector<float>& scores,
-    float nms_threshold) const {
+std::vector<int> YOLODetector::nonMaxSuppression(const std::vector<cv::Rect>& boxes,
+                                                 const std::vector<float>& scores,
+                                                 float nms_threshold) const {
   std::vector<int> indices;
 
   std::vector<int> order(static_cast<int>(boxes.size()));
   for (int i = 0; i < static_cast<int>(boxes.size()); ++i) order[i] = i;
-  std::sort(order.begin(), order.end(), [&](int a, int b) {
-    return scores[a] > scores[b];
-  });
+  std::sort(order.begin(), order.end(), [&](int a, int b) { return scores[a] > scores[b]; });
 
   std::vector<bool> suppressed(boxes.size(), false);
   for (int i = 0; i < static_cast<int>(order.size()); ++i) {
@@ -158,8 +149,7 @@ std::vector<int> YOLODetector::nonMaxSuppression(
 CSVDetectionSource::CSVDetectionSource(const std::string& csv_path) {
   std::ifstream file(csv_path);
   if (!file.is_open()) {
-    std::fprintf(stderr, "Warning: could not open detections CSV: %s\n",
-                 csv_path.c_str());
+    std::fprintf(stderr, "Warning: could not open detections CSV: %s\n", csv_path.c_str());
     return;
   }
 
@@ -185,12 +175,16 @@ CSVDetectionSource::CSVDetectionSource(const std::string& csv_path) {
     while (static_cast<int>(detections_.size()) <= frame_idx) {
       detections_.push_back(std::nullopt);
     }
-    detections_[frame_idx] = cv::Point2f(cx, cy);
+    // CSV has no bbox; create a small default bbox centered on the point
+    const int half_size = 15;
+    cv::Rect bbox(static_cast<int>(cx) - half_size, static_cast<int>(cy) - half_size, 2 * half_size,
+                  2 * half_size);
+    detections_[frame_idx] = Detection{bbox, 1.0f, -1};
     max_frame = std::max(max_frame, frame_idx);
   }
 }
 
-std::optional<cv::Point2f> CSVDetectionSource::next(const cv::Mat&) {
+std::optional<Detection> CSVDetectionSource::next(const cv::Mat&) {
   if (frame_idx_ >= detections_.size()) return std::nullopt;
   return detections_[frame_idx_++];
 }

@@ -2,7 +2,6 @@
 
 #include <opencv2/core.hpp>
 #include <opencv2/dnn.hpp>
-
 #include <optional>
 #include <string>
 #include <vector>
@@ -15,6 +14,10 @@ struct Detection {
   cv::Rect bbox;
   float confidence;
   int class_id;
+
+  [[nodiscard]] cv::Point2f center() const {
+    return cv::Point2f(bbox.x + bbox.width / 2.0f, bbox.y + bbox.height / 2.0f);
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -22,9 +25,9 @@ struct Detection {
 // ---------------------------------------------------------------------------
 
 class DetectionSource {
-public:
+ public:
   virtual ~DetectionSource() = default;
-  virtual std::optional<cv::Point2f> next(const cv::Mat& frame) = 0;
+  virtual std::optional<Detection> next(const cv::Mat& frame) = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -32,19 +35,18 @@ public:
 // ---------------------------------------------------------------------------
 
 class YOLODetector : public DetectionSource {
-public:
+ public:
   YOLODetector(const std::string& model_path, float conf_threshold = 0.5f,
                float nms_threshold = 0.45f);
 
-  std::optional<cv::Point2f> next(const cv::Mat& frame) override;
+  std::optional<Detection> next(const cv::Mat& frame) override;
 
   /// Return all detections for a frame (useful for visualisation).
   std::vector<Detection> detect(const cv::Mat& frame);
 
-private:
+ private:
   std::vector<int> nonMaxSuppression(const std::vector<cv::Rect>& boxes,
-                                     const std::vector<float>& scores,
-                                     float nms_threshold) const;
+                                     const std::vector<float>& scores, float nms_threshold) const;
 
   cv::dnn::Net net_;
   float conf_threshold_;
@@ -59,11 +61,11 @@ private:
 // ---------------------------------------------------------------------------
 
 class CSVDetectionSource : public DetectionSource {
-public:
+ public:
   explicit CSVDetectionSource(const std::string& csv_path);
-  std::optional<cv::Point2f> next(const cv::Mat& frame) override;
+  std::optional<Detection> next(const cv::Mat& frame) override;
 
-private:
-  std::vector<std::optional<cv::Point2f>> detections_;
+ private:
+  std::vector<std::optional<Detection>> detections_;
   size_t frame_idx_ = 0;
 };

@@ -60,6 +60,7 @@
               bear
               python3
               uv
+              typst
             ])
             ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
               pkgs.gdb

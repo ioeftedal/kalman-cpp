@@ -12,12 +12,13 @@
 
 #include <random>
 
-#include "kalman/pixel_measurement_model.hpp"
-#include "kalman/unscented_kalman_filter.hpp"
+#include "kalman/core/filter.hpp"
+#include "kalman/models/pan_tilt.hpp"
+#include "kalman/models/pixel.hpp"
 
 namespace {
 
-using Filter3D = kalman::UnscentedKalmanFilter<double, 9, 2>;
+using Filter3D = kalman::UnscentedKalmanFilter<double, 9, 2, kalman::PanTiltPolicy>;
 using FilterPixel = kalman::UnscentedKalmanFilter<double, 4, 2, kalman::PixelPolicy>;
 using VectorM3 = Filter3D::VectorM;
 using VectorM2 = FilterPixel::VectorM;

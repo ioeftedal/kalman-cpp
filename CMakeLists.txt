@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 enable_testing()
 
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
-find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs videoio highgui dnn)
+find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs videoio video highgui dnn)
 
 add_subdirectory(src)
 

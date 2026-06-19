@@ -10,7 +10,6 @@
 
 namespace kalman {
 
-/// Strip leading and trailing whitespace from a string.
 inline std::string trim(std::string s) {
   auto not_space = [](unsigned char c) { return !std::isspace(c); };
   auto front = std::find_if(s.begin(), s.end(), not_space);
@@ -20,11 +19,6 @@ inline std::string trim(std::string s) {
   return s;
 }
 
-/// Parse a key=value config file, calling `handler(key, value)` for each entry.
-///
-/// Lines starting with `#` and empty lines are skipped.
-/// If the file cannot be opened, a warning is printed and `handler` is never
-/// called.  Returns `true` if the file was opened successfully.
 inline bool parseConfigFile(
     const std::string& path,
     const std::function<void(const std::string&, const std::string&)>& handler) {

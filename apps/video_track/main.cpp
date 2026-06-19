@@ -5,20 +5,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
-#include <string>
-#include <thread>
-#include <vector>
-
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "detector.hpp"
-#include "kalman/config_parser.hpp"
-#include "kalman/pixel_measurement_model.hpp"
-#include "kalman/unscented_kalman_filter.hpp"
+#include "flow_tracker.hpp"
+#include "kalman/core/config_parser.hpp"
+#include "kalman/core/filter.hpp"
+#include "kalman/models/pixel.hpp"
 
 namespace {
 
@@ -27,6 +27,48 @@ using kalman::UnscentedKalmanFilter;
 using Filter = UnscentedKalmanFilter<double, 4, 2, PixelPolicy>;
 using Vec2 = Eigen::Matrix<double, 2, 1>;
 using Mat2 = Eigen::Matrix<double, 2, 2>;
+
+using Mat24 = Eigen::Matrix<double, 2, 4>;
+using Mat42 = Eigen::Matrix<double, 4, 2>;
+
+// ---------------------------------------------------------------------------
+//  Linear KF update with arbitrary H and R (sequential update helper)
+// ---------------------------------------------------------------------------
+
+void linearUpdate(Filter& filter, const Vec2& z, const Mat24& H, const Mat2& R) {
+  auto x = filter.getState();
+  auto P = filter.getCovariance();
+
+  Vec2 nu = z - H * x;
+  Mat2 S = H * P * H.transpose() + R;
+  Mat42 K = S.ldlt().solve((P * H.transpose()).transpose()).transpose();
+
+  x = x + K * nu;
+  P = P - K * S * K.transpose();
+  P = 0.5 * (P + P.transpose());
+
+  filter.setState(x);
+  filter.setCovariance(P);
+}
+
+// ---------------------------------------------------------------------------
+//  Search ROI from predicted state and covariance
+// ---------------------------------------------------------------------------
+
+cv::Rect computeSearchROI(const Filter::VectorN& state, const Filter::MatrixN& cov,
+                          cv::Size frame_size) {
+  double u = state(0);
+  double v = state(1);
+  double sigma_u = std::max(50.0, 3.0 * std::sqrt(cov(0, 0)));
+  double sigma_v = std::max(50.0, 3.0 * std::sqrt(cov(1, 1)));
+
+  int x = std::max(0, static_cast<int>(u - sigma_u));
+  int y = std::max(0, static_cast<int>(v - sigma_v));
+  int w = std::min(frame_size.width - x, static_cast<int>(2.0 * sigma_u));
+  int h = std::min(frame_size.height - y, static_cast<int>(2.0 * sigma_v));
+
+  return cv::Rect(x, y, w, h);
+}
 
 // ---------------------------------------------------------------------------
 //  Configuration
@@ -43,26 +85,48 @@ struct Config {
   double init_pos_sigma = 100.0;
   double init_vel_sigma = 50.0;
 
+  double sigma_klv = 15.0;       // KLT velocity measurement noise std-dev (px/s)
+  double sigma_d_base = 1.0;     // KLT displacement noise baseline (pixels)
+  double occ_noise_rate = 50.0;  // occlusion noise inflation rate (px²/s)
+  int klt_min_features = 4;
+
   std::string output_video = "output/video_track.mp4";
   bool show_display = true;
 };
 
 Config loadConfig(const std::string& path) {
   Config cfg;
-  kalman::parseConfigFile(path, [&](const std::string& key,
-                                     const std::string& val) {
-    if (key == "video_path")       cfg.video_path = val;
-    else if (key == "model_path")  cfg.model_path = val;
-    else if (key == "conf_threshold") cfg.conf_threshold = std::stof(val);
-    else if (key == "detections_csv") cfg.detections_csv = val;
-    else if (key == "qc_cv")       cfg.qc_cv = std::stod(val);
-    else if (key == "sigma_uv")    cfg.sigma_uv = std::stod(val);
-    else if (key == "init_pos_sigma") cfg.init_pos_sigma = std::stod(val);
-    else if (key == "init_vel_sigma") cfg.init_vel_sigma = std::stod(val);
-    else if (key == "output_video")   cfg.output_video = val;
-    else if (key == "show_display")   cfg.show_display = (val == "true");
-    else std::fprintf(stderr, "Warning: unknown config key '%s'\n",
-                      key.c_str());
+  kalman::parseConfigFile(path, [&](const std::string& key, const std::string& val) {
+    if (key == "video_path")
+      cfg.video_path = val;
+    else if (key == "model_path")
+      cfg.model_path = val;
+    else if (key == "conf_threshold")
+      cfg.conf_threshold = std::stof(val);
+    else if (key == "detections_csv")
+      cfg.detections_csv = val;
+    else if (key == "qc_cv")
+      cfg.qc_cv = std::stod(val);
+    else if (key == "sigma_uv")
+      cfg.sigma_uv = std::stod(val);
+    else if (key == "init_pos_sigma")
+      cfg.init_pos_sigma = std::stod(val);
+    else if (key == "init_vel_sigma")
+      cfg.init_vel_sigma = std::stod(val);
+    else if (key == "sigma_klv")
+      cfg.sigma_klv = std::stod(val);
+    else if (key == "sigma_d_base")
+      cfg.sigma_d_base = std::stod(val);
+    else if (key == "occ_noise_rate")
+      cfg.occ_noise_rate = std::stod(val);
+    else if (key == "klt_min_features")
+      cfg.klt_min_features = std::stoi(val);
+    else if (key == "output_video")
+      cfg.output_video = val;
+    else if (key == "show_display")
+      cfg.show_display = (val == "true");
+    else
+      std::fprintf(stderr, "Warning: unknown config key '%s'\n", key.c_str());
   });
 
   std::printf("Config: %s\n", path.c_str());
@@ -72,6 +136,10 @@ Config loadConfig(const std::string& path) {
   std::printf("  detections_csv   = %s\n", cfg.detections_csv.c_str());
   std::printf("  qc_cv            = %.4f\n", cfg.qc_cv);
   std::printf("  sigma_uv         = %.2f px\n", cfg.sigma_uv);
+  std::printf("  sigma_klv        = %.2f px/s\n", cfg.sigma_klv);
+  std::printf("  sigma_d_base     = %.2f px\n", cfg.sigma_d_base);
+  std::printf("  occ_noise_rate   = %.2f px^2/s\n", cfg.occ_noise_rate);
+  std::printf("  klt_min_features = %d\n", cfg.klt_min_features);
   std::printf("  init_pos_sigma   = %.1f px\n", cfg.init_pos_sigma);
   std::printf("  init_vel_sigma   = %.1f px/s\n", cfg.init_vel_sigma);
   std::printf("  output_video     = %s\n", cfg.output_video.c_str());
@@ -91,6 +159,9 @@ struct LogEntry {
   double est_u, est_v, est_vu, est_vv;
   double P_uu, P_vv, P_vuvu, P_vvvv;
   double nees;
+  int klt_features;
+  int occ_counter;
+  double klt_disp_u, klt_disp_v;
 };
 
 void writeLog(const std::string& path, const std::vector<LogEntry>& entries) {
@@ -100,16 +171,17 @@ void writeLog(const std::string& path, const std::vector<LogEntry>& entries) {
     return;
   }
   std::fprintf(csv,
-      "frame,time,meas_u,meas_v,est_u,est_v,est_vu,est_vv,"
-      "P_uu,P_vv,P_vuvu,P_vvvv,nees\n");
+               "frame,time,meas_u,meas_v,est_u,est_v,est_vu,est_vv,"
+               "P_uu,P_vv,P_vuvu,P_vvvv,nees,"
+               "klt_features,occ_counter,klt_disp_u,klt_disp_v\n");
   for (const auto& e : entries) {
     std::fprintf(csv,
-        "%d,%.3f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,"
-        "%.8e,%.8e,%.8e,%.8e,%.8e\n",
-        e.frame, e.time,
-        e.meas_u, e.meas_v,
-        e.est_u, e.est_v, e.est_vu, e.est_vv,
-        e.P_uu, e.P_vv, e.P_vuvu, e.P_vvvv, e.nees);
+                 "%d,%.3f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,"
+                 "%.8e,%.8e,%.8e,%.8e,%.8e,"
+                 "%d,%d,%.2f,%.2f\n",
+                 e.frame, e.time, e.meas_u, e.meas_v, e.est_u, e.est_v, e.est_vu, e.est_vv, e.P_uu,
+                 e.P_vv, e.P_vuvu, e.P_vvvv, e.nees, e.klt_features, e.occ_counter, e.klt_disp_u,
+                 e.klt_disp_v);
   }
   std::fclose(csv);
   std::printf("Wrote %s\n", path.c_str());
@@ -119,23 +191,31 @@ void writeLog(const std::string& path, const std::vector<LogEntry>& entries) {
 //  Drawing helpers
 // ---------------------------------------------------------------------------
 
-void drawHUD(cv::Mat& frame, int frame_idx, double time_s,
-             const Filter::VectorN& state, bool has_detection) {
+void drawHUD(cv::Mat& frame, int frame_idx, double time_s, const Filter::VectorN& state,
+             bool has_detection, bool has_occlusion, int klt_features, int occ_counter) {
   char buf[256];
   std::snprintf(buf, sizeof(buf), "Frame: %d  Time: %.2f s", frame_idx, time_s);
-  cv::putText(frame, buf, cv::Point(20, 40),
-              cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 255), 2);
+  cv::putText(frame, buf, cv::Point(20, 40), cv::FONT_HERSHEY_SIMPLEX, 0.8,
+              cv::Scalar(255, 255, 255), 2);
 
-  std::snprintf(buf, sizeof(buf), "State: [%.0f, %.0f]  vel: [%.1f, %.1f] px/s",
-                state(0), state(1), state(2), state(3));
-  cv::putText(frame, buf, cv::Point(20, 70),
-              cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 1);
+  std::snprintf(buf, sizeof(buf), "State: [%.0f, %.0f]  vel: [%.1f, %.1f] px/s", state(0), state(1),
+                state(2), state(3));
+  cv::putText(frame, buf, cv::Point(20, 70), cv::FONT_HERSHEY_SIMPLEX, 0.6,
+              cv::Scalar(255, 255, 255), 1);
 
-  std::snprintf(buf, sizeof(buf), "Detection: %s",
-                has_detection ? "YES" : "NONE (predict-only)");
-  cv::putText(frame, buf, cv::Point(20, 95),
-              cv::FONT_HERSHEY_SIMPLEX, 0.6,
-              has_detection ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255), 1);
+  if (has_occlusion) {
+    std::snprintf(buf, sizeof(buf), "OCCLUSION t=%d  KLT: %d feats", occ_counter, klt_features);
+    cv::putText(frame, buf, cv::Point(20, 95), cv::FONT_HERSHEY_SIMPLEX, 0.6,
+                cv::Scalar(0, 165, 255), 1);
+  } else if (has_detection) {
+    std::snprintf(buf, sizeof(buf), "Detection: YES  KLT: %d feats", klt_features);
+    cv::putText(frame, buf, cv::Point(20, 95), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0),
+                1);
+  } else {
+    std::snprintf(buf, sizeof(buf), "Detection: NONE (predict-only)");
+    cv::putText(frame, buf, cv::Point(20, 95), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 0, 255),
+                1);
+  }
 }
 
 }  // namespace
@@ -162,8 +242,8 @@ int main(int argc, char** argv) {
   int width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
   int height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
 
-  std::printf("Video: %s  %dx%d  %.2f fps  %d frames\n",
-              cfg.video_path.c_str(), width, height, fps, total_frames);
+  std::printf("Video: %s  %dx%d  %.2f fps  %d frames\n", cfg.video_path.c_str(), width, height, fps,
+              total_frames);
 
   // -----------------------------------------------------------------------
   //  2. Create detection source
@@ -182,8 +262,9 @@ int main(int argc, char** argv) {
       std::printf("Detection: YOLO ONNX (live)\n");
       detector = std::move(yolo);
     } else {
-      std::printf("Detection: no target found in first frame with ONNX, "
-                  "trying CSV fallback...\n");
+      std::printf(
+          "Detection: no target found in first frame with ONNX, "
+          "trying CSV fallback...\n");
       auto csv = std::make_unique<CSVDetectionSource>(cfg.detections_csv);
       detector = std::move(csv);
     }
@@ -200,6 +281,32 @@ int main(int argc, char** argv) {
   filter.setMeasurementNoiseCovariance(R);
 
   bool initialized = false;
+  int occ_counter = 0;
+
+  // -----------------------------------------------------------------------
+  //  3b. Initialise KLT flow tracker
+  // -----------------------------------------------------------------------
+  FlowTracker::Config flow_cfg;
+  flow_cfg.min_features = cfg.klt_min_features;
+  FlowTracker flow_tracker(flow_cfg);
+
+  // Measurement projection matrices for sequential updates
+  // H_yolo: extracts [u, v] from [u, v, vu, vv]
+  Mat24 H_yolo;
+  H_yolo.setZero();
+  H_yolo(0, 0) = 1.0;
+  H_yolo(1, 1) = 1.0;
+
+  // H_klt: extracts [vu, vv] from [u, v, vu, vv]
+  Mat24 H_klt;
+  H_klt.setZero();
+  H_klt(0, 2) = 1.0;
+  H_klt(1, 3) = 1.0;
+
+  // YOLO position measurement noise
+  Mat2 R_yolo;
+  R_yolo << cfg.sigma_uv * cfg.sigma_uv, 0.0, 0.0, cfg.sigma_uv * cfg.sigma_uv;
+  filter.setMeasurementNoiseCovariance(R_yolo);
 
   // -----------------------------------------------------------------------
   //  4. Optional video writer
@@ -231,104 +338,150 @@ int main(int argc, char** argv) {
 
     double time_s = frame_idx / fps;
 
-    // ---- Detection ----
-    auto target = detector->next(frame);
-
-    // ---- UKF update + predict ----
-    bool has_detection = target.has_value();
-    if (has_detection) {
-      Vec2 z(target->x, target->y);
-
-      if (!initialized) {
-        Filter::VectorN x_init;
-        x_init << z(0), z(1), 0.0, 0.0;
-        filter.setState(x_init);
-
-        Filter::MatrixN P0 = Filter::MatrixN::Identity();
-        double p_pos = cfg.init_pos_sigma * cfg.init_pos_sigma * 9.0;
-        double p_vel = cfg.init_vel_sigma * cfg.init_vel_sigma * 9.0;
-        P0(0, 0) = p_pos;
-        P0(1, 1) = p_pos;
-        P0(2, 2) = p_vel;
-        P0(3, 3) = p_vel;
-        filter.setCovariance(P0);
-
-        initialized = true;
-        std::printf("Initialised at frame %d: [%.1f, %.1f]\n",
-                    frame_idx, z(0), z(1));
-      } else {
-        // For NEES, compute innovation before update
-        // The linear measurement model: H extracts [u, v]
-        Eigen::Matrix<double, 2, 4> H;
-        H.setZero();
-        H(0, 0) = 1.0; H(1, 1) = 1.0;
-        Vec2 z_pred = H * filter.getState();
-        Vec2 innovation = z - z_pred;
-        Mat2 S = H * filter.getCovariance() * H.transpose() + R;
-        double nees = innovation.transpose() * S.ldlt().solve(innovation);
-
-        filter.update(z);
-
-        log.push_back({frame_idx, time_s, z(0), z(1),
-                       filter.getState()(0), filter.getState()(1),
-                       filter.getState()(2), filter.getState()(3),
-                       filter.getCovariance()(0, 0),
-                       filter.getCovariance()(1, 1),
-                       filter.getCovariance()(2, 2),
-                       filter.getCovariance()(3, 3), nees});
-      }
-
-      // Draw detection
-      cv::circle(frame, cv::Point(static_cast<int>(z(0)),
-                                   static_cast<int>(z(1))),
-                 8, cv::Scalar(0, 255, 0), -1);
+    // ---- KLT optical flow tracking (from frame_{t-1} to frame_t) ----
+    FlowResult flow;
+    if (initialized && flow_tracker.hasFeatures()) {
+      // State is at predict(t|t-1) from previous frame's end-of-loop predict
+      cv::Rect roi = computeSearchROI(filter.getState(), filter.getCovariance(), frame.size());
+      flow = flow_tracker.track(frame, roi);
     }
 
-    // ---- UKF predict (always, regardless of detection) ----
-    if (initialized && !has_detection) {
-      filter.predict(dt);
+    // ---- YOLO detection ----
+    auto target = detector->next(frame);
+    bool has_detection = target.has_value();
 
-      const auto& state = filter.getState();
-      const auto& cov = filter.getCovariance();
-      log.push_back({frame_idx, time_s, 0.0, 0.0,
-                     state(0), state(1), state(2), state(3),
-                     cov(0, 0), cov(1, 1), cov(2, 2), cov(3, 3), 0.0});
+    // ---- UKF sequential updates ----
+    if (initialized) {
+      // (a) YOLO position update (when available)
+      if (has_detection) {
+        cv::Point2f center = target->center();
+        Vec2 z_y(center.x, center.y);
+
+        // NEES: before update
+        Vec2 z_pred = H_yolo * filter.getState();
+        Vec2 innovation = z_y - z_pred;
+        Mat2 S_y = H_yolo * filter.getCovariance() * H_yolo.transpose() + R_yolo;
+        double nees = innovation.transpose() * S_y.ldlt().solve(innovation);
+
+        linearUpdate(filter, z_y, H_yolo, R_yolo);
+
+        // (b) KLT velocity update (on top of YOLO position update)
+        if (flow.valid) {
+          Vec2 z_k(flow.mean_displacement.x / dt, flow.mean_displacement.y / dt);
+          double sigma_v = std::max(cfg.sigma_klv, flow.uncertainty / dt);
+          Mat2 R_klt;
+          R_klt << sigma_v * sigma_v, 0.0, 0.0, sigma_v * sigma_v;
+          linearUpdate(filter, z_k, H_klt, R_klt);
+        }
+
+        log.push_back({frame_idx, time_s, center.x, center.y, filter.getState()(0),
+                       filter.getState()(1), filter.getState()(2), filter.getState()(3),
+                       filter.getCovariance()(0, 0), filter.getCovariance()(1, 1),
+                       filter.getCovariance()(2, 2), filter.getCovariance()(3, 3), nees,
+                       flow.num_features, occ_counter, flow.mean_displacement.x,
+                       flow.mean_displacement.y});
+
+        occ_counter = 0;
+
+        // Refresh KLT features from current detection
+        flow_tracker.refreshFeatures(frame, target->bbox);
+
+        // Draw detection
+        cv::circle(frame, center, 8, cv::Scalar(0, 255, 0), -1);
+      } else {
+        // No detection: occlusion handling with KLT or predict-only
+        if (flow.valid) {
+          // Occlusion pseudo-position update
+          Vec2 p_pred = filter.getState().head<2>();
+          Vec2 v_pred = filter.getState().tail<2>();
+          Vec2 z_occ(p_pred(0) + flow.mean_displacement.x - dt * v_pred(0),
+                     p_pred(1) + flow.mean_displacement.y - dt * v_pred(1));
+
+          double sigma_occ =
+              std::sqrt(R_yolo(0, 0)) * (1.0 + cfg.occ_noise_rate * occ_counter / dt);
+          Mat2 R_occ;
+          R_occ << sigma_occ * sigma_occ, 0.0, 0.0, sigma_occ * sigma_occ;
+          linearUpdate(filter, z_occ, H_yolo, R_occ);
+        }
+
+        log.push_back({frame_idx, time_s, 0.0, 0.0, filter.getState()(0), filter.getState()(1),
+                       filter.getState()(2), filter.getState()(3), filter.getCovariance()(0, 0),
+                       filter.getCovariance()(1, 1), filter.getCovariance()(2, 2),
+                       filter.getCovariance()(3, 3), 0.0, flow.num_features, occ_counter,
+                       flow.mean_displacement.x, flow.mean_displacement.y});
+
+        occ_counter++;
+      }
+    } else if (!initialized && has_detection) {
+      // ---- First detection: initialise filter and KLT ----
+      cv::Point2f center = target->center();
+      Vec2 z(center.x, center.y);
+
+      Filter::VectorN x_init;
+      x_init << z(0), z(1), 0.0, 0.0;
+      filter.setState(x_init);
+
+      Filter::MatrixN P0 = Filter::MatrixN::Identity();
+      double p_pos = cfg.init_pos_sigma * cfg.init_pos_sigma * 9.0;
+      double p_vel = cfg.init_vel_sigma * cfg.init_vel_sigma * 9.0;
+      P0(0, 0) = p_pos;
+      P0(1, 1) = p_pos;
+      P0(2, 2) = p_vel;
+      P0(3, 3) = p_vel;
+      filter.setCovariance(P0);
+
+      // Initialise KLT features on the first detection
+      flow_tracker.refreshFeatures(frame, target->bbox);
+
+      initialized = true;
+      std::printf("Initialised at frame %d: [%.1f, %.1f]\n", frame_idx, z(0), z(1));
     } else if (!initialized && frame_idx > 30) {
       std::fprintf(stderr, "No detection after 30 frames. Exiting.\n");
       break;
     }
 
-    // ---- Predict for next frame (always after update) ----
-    if (initialized && has_detection) {
+    // ---- Predict for next frame (always after updates) ----
+    if (initialized) {
       filter.predict(dt);
     }
 
-    // ---- Draw prediction ----
+    // ---- Draw prediction and KLT features ----
     if (initialized) {
       const auto& state = filter.getState();
       const auto& cov = filter.getCovariance();
 
-      cv::Point2f pred(static_cast<int>(state(0)),
-                        static_cast<int>(state(1)));
+      cv::Point2f pred(static_cast<int>(state(0)), static_cast<int>(state(1)));
       cv::circle(frame, pred, 10, cv::Scalar(0, 0, 255), 3);
 
       // Velocity arrow (scaled for visibility)
       cv::Point2f vel_tip(static_cast<int>(state(0) + state(2) * 10),
-                           static_cast<int>(state(1) + state(3) * 10));
+                          static_cast<int>(state(1) + state(3) * 10));
       cv::arrowedLine(frame, pred, vel_tip, cv::Scalar(255, 0, 0), 2);
 
       // Uncertainty ellipse (3-sigma)
       cv::ellipse(frame, pred,
                   cv::Size(static_cast<int>(3.0 * std::sqrt(cov(0, 0))),
                            static_cast<int>(3.0 * std::sqrt(cov(1, 1)))),
-                  0.0, 0.0, 360.0,
-                  cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
+                  0.0, 0.0, 360.0, cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
+
+      // Draw KLT feature points
+      const auto& features = flow_tracker.getFeatures();
+      for (const auto& pt : features) {
+        cv::circle(frame, pt, 3, cv::Scalar(0, 255, 255), -1);
+      }
+
+      // Draw mean flow vector
+      if (flow.valid) {
+        cv::Point2f flow_end(pred.x + static_cast<int>(flow.mean_displacement.x * 5),
+                             pred.y + static_cast<int>(flow.mean_displacement.y * 5));
+        cv::arrowedLine(frame, pred, flow_end, cv::Scalar(255, 255, 0), 2, cv::LINE_AA, 0, 0.3);
+      }
     }
 
     // ---- HUD ----
-    drawHUD(frame, frame_idx, time_s,
-            initialized ? filter.getState() : Filter::VectorN::Zero(),
-            has_detection);
+    bool has_occlusion = (initialized && !has_detection && flow.valid);
+    drawHUD(frame, frame_idx, time_s, initialized ? filter.getState() : Filter::VectorN::Zero(),
+            has_detection, has_occlusion, flow.num_features, occ_counter);
 
     // ---- Display / write ----
     if (save_video) writer.write(frame);
@@ -340,7 +493,10 @@ int main(int argc, char** argv) {
         paused = !paused;
         while (paused) {
           int k = cv::waitKey(30) & 0xFF;
-          if (k == 'p' || k == 'q') { paused = false; if (k == 'q') break; }
+          if (k == 'p' || k == 'q') {
+            paused = false;
+            if (k == 'q') break;
+          }
         }
         if (key == 'q') break;
       }
@@ -382,10 +538,20 @@ int main(int argc, char** argv) {
     double mean_nees = total_nees / std::max(nees_count, 1);
     double track_pct = 100.0 * detection_count / std::max(nees_count, 1);
 
+    int occlusion_frames = 0;
+    int klt_active_frames = 0;
+    for (const auto& e : log) {
+      if (e.occ_counter > 0) occlusion_frames++;
+      if (e.klt_features > 0) klt_active_frames++;
+    }
+
     std::printf("\n=== Tracking Summary ===\n");
     std::printf("  Frames processed: %d\n", nees_count);
-    std::printf("  Frames with detection: %d (%.1f%%)\n",
-                detection_count, track_pct);
+    std::printf("  Frames with detection: %d (%.1f%%)\n", detection_count, track_pct);
+    std::printf("  Frames with KLT: %d (%.1f%%)\n", klt_active_frames,
+                100.0 * klt_active_frames / std::max(nees_count, 1));
+    std::printf("  Frames in occlusion: %d (%.1f%%)\n", occlusion_frames,
+                100.0 * occlusion_frames / std::max(nees_count, 1));
     std::printf("  RMSE (vs detection): %.2f px\n", rmse);
     std::printf("  Mean NEES: %.2f (target: ~4.0 for 4-DOF)\n", mean_nees);
 
