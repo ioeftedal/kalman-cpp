@@ -10,6 +10,8 @@ struct FlowResult {
   cv::Point2f mean_displacement{0, 0};
   double uncertainty = 0.0;
   int num_features = 0;
+  std::vector<float> per_feature_error;     // forward-backward error per tracked feature
+  std::vector<cv::Point2f> feature_points;  // current image coordinates of tracked features
 };
 
 class FlowTracker {

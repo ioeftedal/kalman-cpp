@@ -85,10 +85,12 @@ struct Config {
   double init_pos_sigma = 100.0;
   double init_vel_sigma = 50.0;
 
-  double sigma_klv = 15.0;       // KLT velocity measurement noise std-dev (px/s)
+  double sigma_klv = 10.0;       // KLT velocity measurement noise std-dev (px/s)
   double sigma_d_base = 1.0;     // KLT displacement noise baseline (pixels)
   double occ_noise_rate = 50.0;  // occlusion noise inflation rate (px²/s)
   int klt_min_features = 4;
+  double gate_threshold = 9.21;    // Mahalanobis gate: chi-squared 2-DOF @ 99%
+  double conf_noise_scale = 10.0;  // YOLO confidence noise scaling factor
 
   std::string output_video = "output/video_track.mp4";
   bool show_display = true;
@@ -121,6 +123,10 @@ Config loadConfig(const std::string& path) {
       cfg.occ_noise_rate = std::stod(val);
     else if (key == "klt_min_features")
       cfg.klt_min_features = std::stoi(val);
+    else if (key == "gate_threshold")
+      cfg.gate_threshold = std::stod(val);
+    else if (key == "conf_noise_scale")
+      cfg.conf_noise_scale = std::stod(val);
     else if (key == "output_video")
       cfg.output_video = val;
     else if (key == "show_display")
@@ -140,6 +146,8 @@ Config loadConfig(const std::string& path) {
   std::printf("  sigma_d_base     = %.2f px\n", cfg.sigma_d_base);
   std::printf("  occ_noise_rate   = %.2f px^2/s\n", cfg.occ_noise_rate);
   std::printf("  klt_min_features = %d\n", cfg.klt_min_features);
+  std::printf("  gate_threshold   = %.2f\n", cfg.gate_threshold);
+  std::printf("  conf_noise_scale = %.1f\n", cfg.conf_noise_scale);
   std::printf("  init_pos_sigma   = %.1f px\n", cfg.init_pos_sigma);
   std::printf("  init_vel_sigma   = %.1f px/s\n", cfg.init_vel_sigma);
   std::printf("  output_video     = %s\n", cfg.output_video.c_str());
@@ -353,27 +361,53 @@ int main(int argc, char** argv) {
     // ---- UKF sequential updates ----
     if (initialized) {
       // (a) YOLO position update (when available)
+      bool detection_accepted = false;
+      cv::Point2f center(0, 0);
+      double nees = 0.0;
+
       if (has_detection) {
-        cv::Point2f center = target->center();
+        center = target->center();
         Vec2 z_y(center.x, center.y);
+        float conf = target->confidence;
 
-        // NEES: before update
-        Vec2 z_pred = H_yolo * filter.getState();
-        Vec2 innovation = z_y - z_pred;
-        Mat2 S_y = H_yolo * filter.getCovariance() * H_yolo.transpose() + R_yolo;
-        double nees = innovation.transpose() * S_y.ldlt().solve(innovation);
+        // Confidence-adaptive measurement noise
+        double conf_scale = 1.0 + cfg.conf_noise_scale * (1.0 - conf);
+        Mat2 R_yolo_eff = R_yolo * conf_scale;
 
-        linearUpdate(filter, z_y, H_yolo, R_yolo);
+        // Innovation gating: reject outlier detections via Mahalanobis distance
+        Vec2 innovation = z_y - H_yolo * filter.getState();
+        Mat2 S_y = H_yolo * filter.getCovariance() * H_yolo.transpose() + R_yolo_eff;
+        double mahalanobis_sq = innovation.transpose() * S_y.ldlt().solve(innovation);
 
-        // (b) KLT velocity update (on top of YOLO position update)
-        if (flow.valid) {
-          Vec2 z_k(flow.mean_displacement.x / dt, flow.mean_displacement.y / dt);
-          double sigma_v = std::max(cfg.sigma_klv, flow.uncertainty / dt);
-          Mat2 R_klt;
-          R_klt << sigma_v * sigma_v, 0.0, 0.0, sigma_v * sigma_v;
-          linearUpdate(filter, z_k, H_klt, R_klt);
+        if (mahalanobis_sq < cfg.gate_threshold) {
+          detection_accepted = true;
+
+          nees = mahalanobis_sq;  // NEES = Mahalanobis distance squared
+          linearUpdate(filter, z_y, H_yolo, R_yolo_eff);
+
+          // (b) KLT velocity update (on top of YOLO position update)
+          if (flow.valid) {
+            Vec2 z_k(flow.mean_displacement.x / dt, flow.mean_displacement.y / dt);
+            // Bidirectional KLT quality-adaptive sigma
+            double sigma_v = cfg.sigma_klv;
+            double uncertainty_ratio = (flow.uncertainty / dt) / cfg.sigma_klv;
+            double quality_factor = std::min(1.0, flow.num_features / 15.0);
+            if (uncertainty_ratio > 1.0) {
+              sigma_v *= uncertainty_ratio;  // bad KLT: trust less
+            } else {
+              sigma_v *= (1.0 + 0.5 * (1.0 - quality_factor));  // good KLT: trust more
+            }
+            sigma_v = std::max(1.0, sigma_v);
+            Mat2 R_klt;
+            R_klt << sigma_v * sigma_v, 0.0, 0.0, sigma_v * sigma_v;
+            linearUpdate(filter, z_k, H_klt, R_klt);
+          }
+        } else {
+          has_detection = false;  // gated: treat as occlusion for HUD/logic
         }
+      }
 
+      if (detection_accepted) {
         log.push_back({frame_idx, time_s, center.x, center.y, filter.getState()(0),
                        filter.getState()(1), filter.getState()(2), filter.getState()(3),
                        filter.getCovariance()(0, 0), filter.getCovariance()(1, 1),
@@ -389,19 +423,15 @@ int main(int argc, char** argv) {
         // Draw detection
         cv::circle(frame, center, 8, cv::Scalar(0, 255, 0), -1);
       } else {
-        // No detection: occlusion handling with KLT or predict-only
+        // No detection or rejected by gating: occlusion handling with KLT or predict-only
         if (flow.valid) {
-          // Occlusion pseudo-position update
-          Vec2 p_pred = filter.getState().head<2>();
-          Vec2 v_pred = filter.getState().tail<2>();
-          Vec2 z_occ(p_pred(0) + flow.mean_displacement.x - dt * v_pred(0),
-                     p_pred(1) + flow.mean_displacement.y - dt * v_pred(1));
-
-          double sigma_occ =
-              std::sqrt(R_yolo(0, 0)) * (1.0 + cfg.occ_noise_rate * occ_counter / dt);
-          Mat2 R_occ;
-          R_occ << sigma_occ * sigma_occ, 0.0, 0.0, sigma_occ * sigma_occ;
-          linearUpdate(filter, z_occ, H_yolo, R_occ);
+          // KLT velocity update (cleaner than pseudo-position approach)
+          Vec2 z_k(flow.mean_displacement.x / dt, flow.mean_displacement.y / dt);
+          double occ_scale = 1.0 + cfg.occ_noise_rate * occ_counter / dt;
+          double sigma_v = std::max(1.0, (flow.uncertainty / dt) * occ_scale);
+          Mat2 R_klt;
+          R_klt << sigma_v * sigma_v, 0.0, 0.0, sigma_v * sigma_v;
+          linearUpdate(filter, z_k, H_klt, R_klt);
         }
 
         log.push_back({frame_idx, time_s, 0.0, 0.0, filter.getState()(0), filter.getState()(1),
@@ -464,10 +494,25 @@ int main(int argc, char** argv) {
                            static_cast<int>(3.0 * std::sqrt(cov(1, 1)))),
                   0.0, 0.0, 360.0, cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
 
-      // Draw KLT feature points
-      const auto& features = flow_tracker.getFeatures();
-      for (const auto& pt : features) {
-        cv::circle(frame, pt, 3, cv::Scalar(0, 255, 255), -1);
+      // Draw KLT feature points colored by quality
+      // Green: low FB error (< 0.5 px), Yellow: moderate (0.5-1.0), Red: poor (> 1.0)
+      if (flow.valid && flow.per_feature_error.size() == flow.feature_points.size()) {
+        for (size_t i = 0; i < flow.feature_points.size(); ++i) {
+          cv::Scalar color;
+          float err = flow.per_feature_error[i];
+          if (err < 0.5f)
+            color = cv::Scalar(0, 255, 0);  // green
+          else if (err < 1.0f)
+            color = cv::Scalar(0, 255, 255);  // yellow
+          else
+            color = cv::Scalar(0, 0, 255);  // red
+          cv::circle(frame, flow.feature_points[i], 3, color, -1);
+        }
+      } else {
+        const auto& features = flow_tracker.getFeatures();
+        for (const auto& pt : features) {
+          cv::circle(frame, pt, 3, cv::Scalar(0, 255, 255), -1);
+        }
       }
 
       // Draw mean flow vector

@@ -45,8 +45,10 @@ FlowResult FlowTracker::track(const cv::Mat& frame, const cv::Rect& search_roi) 
   // Collect valid features: passed forward+backward tracking, inside ROI
   std::vector<cv::Point2f> valid_next;
   std::vector<cv::Point2f> displacements;
+  std::vector<float> feature_errors;
   valid_next.reserve(prev_pts_.size());
   displacements.reserve(prev_pts_.size());
+  feature_errors.reserve(prev_pts_.size());
 
   for (size_t i = 0; i < prev_pts_.size(); ++i) {
     if (!fwd_status[i] || !back_status[i]) continue;
@@ -59,6 +61,7 @@ FlowResult FlowTracker::track(const cv::Mat& frame, const cv::Rect& search_roi) 
 
     valid_next.push_back(next_pts[i]);
     displacements.push_back(next_pts[i] - prev_pts_[i]);
+    feature_errors.push_back(fb_err);
   }
 
   if (static_cast<int>(displacements.size()) < cfg_.min_features) {
@@ -86,8 +89,10 @@ FlowResult FlowTracker::track(const cv::Mat& frame, const cv::Rect& search_roi) 
   // Residual filtering: reject displacement vectors far from median
   std::vector<cv::Point2f> filtered_disp;
   std::vector<cv::Point2f> filtered_pts;
+  std::vector<float> filtered_errors;
   filtered_disp.reserve(displacements.size());
   filtered_pts.reserve(displacements.size());
+  filtered_errors.reserve(displacements.size());
 
   for (size_t i = 0; i < displacements.size(); ++i) {
     float res = std::sqrt(std::pow(displacements[i].x - med_dx, 2) +
@@ -95,6 +100,7 @@ FlowResult FlowTracker::track(const cv::Mat& frame, const cv::Rect& search_roi) 
     if (res < cfg_.resid_threshold) {
       filtered_disp.push_back(displacements[i]);
       filtered_pts.push_back(valid_next[i]);
+      filtered_errors.push_back(feature_errors[i]);
     }
   }
 
@@ -131,6 +137,8 @@ FlowResult FlowTracker::track(const cv::Mat& frame, const cv::Rect& search_roi) 
   result.mean_displacement = cv::Point2f(static_cast<float>(mx), static_cast<float>(my));
   result.uncertainty = sigma_d;
   result.num_features = static_cast<int>(filtered_disp.size());
+  result.per_feature_error = filtered_errors;
+  result.feature_points = filtered_pts;
   return result;
 }
 
