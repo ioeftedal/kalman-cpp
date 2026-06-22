@@ -1,6 +1,6 @@
 # kalman-cpp
 
-**Unscented Kalman Filter (UKF) library for real-time tracking** — written in modern C++23 with Eigen3.
+**Unscented Kalman Filter (UKF) library for real-time tracking** — written in modern C++20 with Eigen3.
 
 - **Header-only** (with optional pre-compiled instantiations)
 - **Compile-time policy dispatch** selects process + measurement models with zero runtime overhead
