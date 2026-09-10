@@ -5,7 +5,7 @@ target_compile_options(kalman PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 if(KALMAN_USE_TRACY)
   target_compile_definitions(kalman PUBLIC TRACY_ENABLE)
-  target_link_libraries(kalman PUBLIC TracyClient)
+  target_link_libraries(kalman PUBLIC Tracy::TracyClient)
 
   # Ghostty-style capture options.
   if(KALMAN_TRACY_ON_DEMAND)

@@ -39,19 +39,32 @@ find_package(
              highgui
              dnn)
 
-# Tracy profiler dependency
+# Tracy profiler dependency. Prefer an installed Tracy (e.g. the pinned nixpkgs
+# `tracy` in the dev shell); otherwise fetch the pinned release archive so the
+# build is fully reproducible (no git / tag drift).
 if(KALMAN_USE_TRACY)
-  include(FetchContent)
-  FetchContent_Declare(
-    tracy
-    GIT_REPOSITORY https://github.com/wolfpld/tracy.git
-    GIT_TAG v0.11.1
-    GIT_SHALLOW TRUE)
-  FetchContent_MakeAvailable(tracy)
-  # Tracy's code is not clean under the project's strict -Werror flags
-  # (inherited via CXXFLAGS) on recent compilers; relax only for Tracy.
-  if(TARGET TracyClient)
-    target_compile_options(TracyClient PRIVATE -Wno-error)
+  find_package(Tracy QUIET)
+  if(NOT Tracy_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(
+      tracy
+      URL https://github.com/wolfpld/tracy/archive/refs/tags/v0.13.1.tar.gz
+      URL_HASH
+        SHA256=d4efc50ebcb0bfcfdbba148995aeb75044c0d80f5d91223aebfaa8fa9e563d2b
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(tracy)
+    # Tracy is not clean under the project's strict -Werror flags (inherited via
+    # CXXFLAGS) on recent compilers; relax only for Tracy.
+    if(TARGET TracyClient)
+      target_compile_options(TracyClient PRIVATE -Wno-error)
+      if(KALMAN_TRACY_ON_DEMAND)
+        target_compile_definitions(TracyClient PRIVATE TRACY_ON_DEMAND)
+      endif()
+      if(KALMAN_TRACY_CALLSTACK GREATER 0)
+        target_compile_definitions(
+          TracyClient PRIVATE TRACY_CALLSTACK=${KALMAN_TRACY_CALLSTACK})
+      endif()
+    endif()
   endif()
 endif()
 

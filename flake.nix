@@ -61,6 +61,9 @@
               python3
               uv
               typst
+              # Tracy profiler GUI + instrumentation client (pinned by the
+              # nixpkgs-unstable lockfile of this flake).
+              tracy
             ])
             ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
               pkgs.gdb
@@ -119,6 +122,8 @@
             shellHook = ''
               ${config.checks.pre-commit.shellHook}
               export CMAKE_EXPORT_COMPILE_COMMANDS=ON
+              # Resolve find_package(Tracy) to the pinned nixpkgs tracy.
+              export CMAKE_PREFIX_PATH="${pkgs.tracy}:''${CMAKE_PREFIX_PATH:-}"
             '';
 
             CXXFLAGS = "-std=c++17 -Wall -Wextra -Wpedantic -Werror";
