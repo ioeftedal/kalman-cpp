@@ -66,7 +66,8 @@ struct ThermalPolicy {
     return z;
   }
 
-  static void wrapInnovation(auto&) noexcept {}
+  template <typename T>
+  static void wrapInnovation(Eigen::Matrix<T, 1, 1>&) noexcept {}
 };
 
 }  // namespace kalman

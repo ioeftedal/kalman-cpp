@@ -6,9 +6,9 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
-#include <numbers>
 
 #include "../helpers/model_test.hpp"
+#include "kalman/core/constants.hpp"
 #include "kalman/core/filter.hpp"
 
 // -----------------------------------------------------------------------
@@ -48,17 +48,17 @@ TEST(PanTiltMeasurement, KnownPositions) {
 
   // Target to the right → positive pan
   auto z2 = kalman::h(Vec6{100, 0, 0, 0, 0, 0});
-  EXPECT_NEAR(z2(0), std::numbers::pi / 2, 1e-10);
+  EXPECT_NEAR(z2(0), kalman::constants::pi / 2, 1e-10);
   EXPECT_NEAR(z2(1), 0.0, 1e-10);
 
   // Target above → positive tilt
   auto z3 = kalman::h(Vec6{0, 100, 100, 0, 0, 0});
   EXPECT_NEAR(z3(0), 0.0, 1e-10);
-  EXPECT_NEAR(z3(1), std::numbers::pi / 4, 1e-10);
+  EXPECT_NEAR(z3(1), kalman::constants::pi / 4, 1e-10);
 
   // Behind → pan = ±π
   auto z4 = kalman::h(Vec6{0, 0, -100, 0, 0, 0});
-  EXPECT_NEAR(std::abs(z4(0)), std::numbers::pi, 1e-10);
+  EXPECT_NEAR(std::abs(z4(0)), kalman::constants::pi, 1e-10);
   EXPECT_NEAR(z4(1), 0.0, 1e-10);
 }
 
@@ -70,8 +70,8 @@ TEST(PanTiltMeasurement, InnovationWrapping) {
   Eigen::Vector2d nu;
   nu << 3.0, 0.5;  // pan outside (-π, π]
   kalman::PanTiltPolicy::wrapInnovation(nu);
-  EXPECT_GT(nu(0), -std::numbers::pi);
-  EXPECT_LE(nu(0), std::numbers::pi);
+  EXPECT_GT(nu(0), -kalman::constants::pi);
+  EXPECT_LE(nu(0), kalman::constants::pi);
   EXPECT_NEAR(nu(1), 0.5, 1e-10);  // tilt unchanged
 }
 

@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "kalman/core/constants.hpp"
 #include "kalman/core/filter.hpp"
 
 using WorldCaFilter = kalman::UnscentedKalmanFilter<double, 9, 2, kalman::WorldFramePanTiltPolicy>;
@@ -41,7 +42,7 @@ TEST(WorldFrameMeasurement, CameraRotation) {
   x << 100, 0, 0, 0, 0, 0, 0, 0, 0;
 
   // Camera looks east (pan = +π/2 from north)
-  filter.getPolicy().setOrientation(std::numbers::pi / 2, 0.0);
+  filter.getPolicy().setOrientation(kalman::constants::pi / 2, 0.0);
   auto z = filter.getPolicy().h(x);
   // With camera looking east, target at east should be centred
   EXPECT_NEAR(z(0), 0.0, 1e-6);
@@ -73,7 +74,7 @@ TEST(WorldFrameMeasurement, CameraTranslation) {
 TEST(WorldFrameMeasurement, TiltUp) {
   WorldCaFilter filter;
   filter.getPolicy().setCameraPosition(0, 0, 0);
-  filter.getPolicy().setOrientation(0.0, std::numbers::pi / 4);  // tilt up 45°
+  filter.getPolicy().setOrientation(0.0, kalman::constants::pi / 4);  // tilt up 45°
 
   // Target at (0, 100, 100) — 100m north, 100m up
   Eigen::Matrix<double, 9, 1> x;
@@ -82,7 +83,7 @@ TEST(WorldFrameMeasurement, TiltUp) {
   auto z = filter.getPolicy().h(x);
   // With camera tilted up 45°, elevation to target is relative
   double true_elev = std::atan2(100, 100);  // 45° elevation
-  EXPECT_NEAR(z(1), true_elev - std::numbers::pi / 4, 1e-6);
+  EXPECT_NEAR(z(1), true_elev - kalman::constants::pi / 4, 1e-6);
 }
 
 // -----------------------------------------------------------------------

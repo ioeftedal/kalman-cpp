@@ -11,7 +11,6 @@
 #include <Eigen/Eigenvalues>
 #include <Eigen/LU>
 #include <limits>
-#include <numbers>
 
 #include "kalman/core/concepts.hpp"
 #include "kalman/core/fwd.hpp"
@@ -31,9 +30,9 @@ template <typename T, int N, int M, typename Policy>
 class UnscentedKalmanFilter {
   static_assert(N > 0, "State dimension N must be positive");
   static_assert(M > 0, "Measurement dimension M must be positive");
-  static_assert(KalmanPolicy<Policy>,
-                "Policy must satisfy the KalmanPolicy concept (provide "
-                "ModelTag and isMeasurementLinear)");
+  static_assert(is_kalman_policy_v<Policy>,
+                "Policy must satisfy KalmanPolicy (provide ModelTag and "
+                "isMeasurementLinear)");
 
  public:
   using Scalar = T;

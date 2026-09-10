@@ -4,10 +4,10 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
-#include <numbers>
 
 #include "../helpers/model_test.hpp"
 #include "../helpers/trajectories.hpp"
+#include "kalman/core/constants.hpp"
 #include "kalman/core/filter.hpp"
 #include "kalman/models/thermal.hpp"
 
@@ -44,7 +44,7 @@ std::vector<Eigen::Matrix<double, 2, 1>> generateThermalTrajectory(int n_steps, 
   for (int k = 0; k < n_steps; ++k) {
     double t = k * dt;
     Eigen::Matrix<double, 2, 1> x;
-    double w = 2 * std::numbers::pi * freq;
+    double w = 2 * kalman::constants::pi * freq;
     x(0) = T0 + amp * std::sin(w * t);  // temperature
     x(1) = amp * w * std::cos(w * t);   // dT/dt
     states.push_back(x);

@@ -4,6 +4,8 @@
 #include <random>
 #include <vector>
 
+#include "kalman/core/constants.hpp"
+
 namespace helpers {
 
 enum class StateComponent { Position, Velocity, Acceleration };
@@ -20,15 +22,15 @@ std::vector<Eigen::Matrix<double, N, 1>> generateFigure8States(int n_steps, doub
     double t = k * dt;
     Eigen::Matrix<double, N, 1> x;
     x.setZero();
-    x(0) = amplitude * std::sin(2 * std::numbers::pi * freq * t);
-    x(1) = amplitude * std::sin(4 * std::numbers::pi * freq * t);
+    x(0) = amplitude * std::sin(2 * kalman::constants::pi * freq * t);
+    x(1) = amplitude * std::sin(4 * kalman::constants::pi * freq * t);
     if constexpr (N >= 4) {
-      x(2) = 2 * std::numbers::pi * freq * amplitude * std::cos(2 * std::numbers::pi * freq * t);
-      x(3) = 4 * std::numbers::pi * freq * amplitude * std::cos(4 * std::numbers::pi * freq * t);
+      x(2) = 2 * kalman::constants::pi * freq * amplitude * std::cos(2 * kalman::constants::pi * freq * t);
+      x(3) = 4 * kalman::constants::pi * freq * amplitude * std::cos(4 * kalman::constants::pi * freq * t);
     }
     if constexpr (N >= 6) {
-      double w2 = 2 * std::numbers::pi * freq;
-      double w4 = 4 * std::numbers::pi * freq;
+      double w2 = 2 * kalman::constants::pi * freq;
+      double w4 = 4 * kalman::constants::pi * freq;
       x(4) = -w2 * w2 * amplitude * std::sin(w2 * t);
       x(5) = -w4 * w4 * amplitude * std::sin(w4 * t);
     }

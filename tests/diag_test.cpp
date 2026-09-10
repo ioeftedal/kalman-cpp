@@ -5,9 +5,9 @@
 #include <Eigen/Core>
 #include <cstdio>
 #include <iostream>
-#include <numbers>
 #include <random>
 
+#include "kalman/core/constants.hpp"
 #include "kalman/core/filter.hpp"
 #include "kalman/models/pan_tilt.hpp"
 
@@ -16,7 +16,7 @@ namespace {
 using kalman::UnscentedKalmanFilter;
 using FilterD = UnscentedKalmanFilter<double, 9, 2, kalman::PanTiltPolicy>;
 
-constexpr double kPi = std::numbers::pi_v<double>;
+constexpr double kPi = kalman::constants::pi_v<double>;
 
 struct TrajectorySample {
   double t;

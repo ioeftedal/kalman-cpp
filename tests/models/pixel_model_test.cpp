@@ -4,7 +4,6 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
-#include <numbers>
 
 #include "../helpers/model_test.hpp"
 #include "../helpers/trajectories.hpp"

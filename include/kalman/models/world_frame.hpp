@@ -5,8 +5,8 @@
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <numbers>
 
+#include "kalman/core/constants.hpp"
 #include "kalman/core/fwd.hpp"
 #include "kalman/models/pan_tilt.hpp"
 
@@ -66,7 +66,7 @@ struct WorldFramePanTiltPolicy {
 
   template <typename T>
   static void wrapInnovation(Eigen::Matrix<T, 2, 1>& nu) noexcept {
-    constexpr T two_pi = T(2) * std::numbers::pi_v<T>;
+    constexpr T two_pi = T(2) * constants::pi_v<T>;
     nu(0) = std::remainder(nu(0), two_pi);
   }
 

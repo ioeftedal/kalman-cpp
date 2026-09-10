@@ -83,7 +83,7 @@
               "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
             ];
 
-            CXXFLAGS = [ "-std=c++20" ];
+            CXXFLAGS = [ "-std=c++17" ];
           };
         in
         {
@@ -121,7 +121,7 @@
               export CMAKE_EXPORT_COMPILE_COMMANDS=ON
             '';
 
-            CXXFLAGS = "-std=c++20 -Wall -Wextra -Wpedantic -Werror";
+            CXXFLAGS = "-std=c++17 -Wall -Wextra -Wpedantic -Werror";
 
             hardeningDisable = [ "fortify" ];
           };
