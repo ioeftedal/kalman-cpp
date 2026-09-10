@@ -6,6 +6,8 @@
 #include <fstream>
 #include <sstream>
 
+#include "kalman/core/profiling.hpp"
+
 // ===========================================================================
 //  YOLODetector
 // ===========================================================================
@@ -28,18 +30,26 @@ std::optional<Detection> YOLODetector::next(const cv::Mat& frame) {
 }
 
 std::vector<Detection> YOLODetector::detect(const cv::Mat& frame) {
+  KALMAN_PROFILE_ZONE_NAMED_C("YOLO::detect", kalman::profiling::ColorVision);
   // -----------------------------------------------------------------------
   //  1. Pre-process: blob from image
   // -----------------------------------------------------------------------
-  cv::Mat blob = cv::dnn::blobFromImage(frame, 1.0f / 255.0f, cv::Size(input_width_, input_height_),
-                                        cv::Scalar(), true, false);
+  cv::Mat blob;
+  {
+    KALMAN_PROFILE_ZONE_NAMED_C("YOLO::blob", kalman::profiling::ColorVision);
+    blob = cv::dnn::blobFromImage(frame, 1.0f / 255.0f, cv::Size(input_width_, input_height_),
+                                  cv::Scalar(), true, false);
+  }
   net_.setInput(blob);
 
   // -----------------------------------------------------------------------
   //  2. Forward pass
   // -----------------------------------------------------------------------
   std::vector<cv::Mat> outputs;
-  net_.forward(outputs, net_.getUnconnectedOutLayersNames());
+  {
+    KALMAN_PROFILE_ZONE_NAMED_C("YOLO::forward", kalman::profiling::ColorVision);
+    net_.forward(outputs, net_.getUnconnectedOutLayersNames());
+  }
 
   // YOLOv8n output shape: (1, 84, 8400)  — 84 = 4 bbox + 80 COCO classes
   const float* data = reinterpret_cast<const float*>(outputs[0].data);
@@ -57,47 +67,50 @@ std::vector<Detection> YOLODetector::detect(const cv::Mat& frame) {
   std::vector<int> class_ids;
   std::vector<int> indices;
 
-  for (int i = 0; i < num_detections; ++i) {
-    // Find the max class score among COCO classes
-    float max_score = 0.0f;
-    int best_class = -1;
-    for (int j = 4; j < num_channels; ++j) {
-      float s = data[j * num_detections + i];
-      if (s > max_score) {
-        max_score = s;
-        best_class = j - 4;
+  {
+    KALMAN_PROFILE_ZONE_NAMED_C("YOLO::parse", kalman::profiling::ColorVision);
+    for (int i = 0; i < num_detections; ++i) {
+      // Find the max class score among COCO classes
+      float max_score = 0.0f;
+      int best_class = -1;
+      for (int j = 4; j < num_channels; ++j) {
+        float s = data[j * num_detections + i];
+        if (s > max_score) {
+          max_score = s;
+          best_class = j - 4;
+        }
       }
+
+      // Filter by confidence
+      if (max_score < conf_threshold_) continue;
+
+      // Filter by target classes
+      if (std::find(target_classes_.begin(), target_classes_.end(), best_class) ==
+          target_classes_.end())
+        continue;
+
+      // Decode bbox (cx, cy, w, h) → (x1, y1, x2, y2)
+      float cx = data[0 * num_detections + i];
+      float cy = data[1 * num_detections + i];
+      float w = data[2 * num_detections + i];
+      float h = data[3 * num_detections + i];
+
+      // Scale from network input size to original frame size
+      cx *= scale_x;
+      cy *= scale_y;
+      w *= scale_x;
+      h *= scale_y;
+
+      float x1 = cx - w / 2.0f;
+      float y1 = cy - h / 2.0f;
+      float x2 = cx + w / 2.0f;
+      float y2 = cy + h / 2.0f;
+
+      boxes.emplace_back(static_cast<int>(x1), static_cast<int>(y1), static_cast<int>(x2 - x1),
+                         static_cast<int>(y2 - y1));
+      scores.push_back(max_score);
+      class_ids.push_back(best_class);
     }
-
-    // Filter by confidence
-    if (max_score < conf_threshold_) continue;
-
-    // Filter by target classes
-    if (std::find(target_classes_.begin(), target_classes_.end(), best_class) ==
-        target_classes_.end())
-      continue;
-
-    // Decode bbox (cx, cy, w, h) → (x1, y1, x2, y2)
-    float cx = data[0 * num_detections + i];
-    float cy = data[1 * num_detections + i];
-    float w = data[2 * num_detections + i];
-    float h = data[3 * num_detections + i];
-
-    // Scale from network input size to original frame size
-    cx *= scale_x;
-    cy *= scale_y;
-    w *= scale_x;
-    h *= scale_y;
-
-    float x1 = cx - w / 2.0f;
-    float y1 = cy - h / 2.0f;
-    float x2 = cx + w / 2.0f;
-    float y2 = cy + h / 2.0f;
-
-    boxes.emplace_back(static_cast<int>(x1), static_cast<int>(y1), static_cast<int>(x2 - x1),
-                       static_cast<int>(y2 - y1));
-    scores.push_back(max_score);
-    class_ids.push_back(best_class);
   }
 
   // -----------------------------------------------------------------------
@@ -121,6 +134,7 @@ std::vector<Detection> YOLODetector::detect(const cv::Mat& frame) {
 std::vector<int> YOLODetector::nonMaxSuppression(const std::vector<cv::Rect>& boxes,
                                                  const std::vector<float>& scores,
                                                  float nms_threshold) const {
+  KALMAN_PROFILE_ZONE_NAMED_C("YOLO::nms", kalman::profiling::ColorVision);
   std::vector<int> indices;
 
   std::vector<int> order(static_cast<int>(boxes.size()));

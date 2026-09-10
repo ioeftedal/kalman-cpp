@@ -4,10 +4,13 @@
 #include <cmath>
 #include <cstdio>
 
+#include "kalman/core/profiling.hpp"
+
 FlowTracker::FlowTracker() : cfg_(Config{}) {}
 FlowTracker::FlowTracker(Config cfg) : cfg_(cfg) {}
 
 FlowResult FlowTracker::track(const cv::Mat& frame, const cv::Rect& search_roi) {
+  KALMAN_PROFILE_ZONE_NAMED_C("FlowTracker::track", kalman::profiling::ColorMotion);
   FlowResult result;
 
   if (prev_pts_.empty() || !has_prev_frame_) {
@@ -25,18 +28,24 @@ FlowResult FlowTracker::track(const cv::Mat& frame, const cv::Rect& search_roi) 
   std::vector<cv::Point2f> next_pts(prev_pts_.size());
   std::vector<uchar> fwd_status;
   std::vector<float> fwd_err;
-  cv::calcOpticalFlowPyrLK(prev_gray_, curr_gray, prev_pts_, next_pts, fwd_status, fwd_err,
-                           cv::Size(cfg_.win_size, cfg_.win_size), cfg_.max_level);
+  {
+    KALMAN_PROFILE_ZONE_NAMED_C("FlowTracker::fwd_LK", kalman::profiling::ColorMotion);
+    cv::calcOpticalFlowPyrLK(prev_gray_, curr_gray, prev_pts_, next_pts, fwd_status, fwd_err,
+                             cv::Size(cfg_.win_size, cfg_.win_size), cfg_.max_level);
+  }
 
   // Backward tracking: frame_t → frame_{t-1} (for forward-backward check)
   // Pre-allocate; OpenCV will copy next_pts as the initial estimate (no flag needed)
   std::vector<cv::Point2f> back_pts(next_pts.size());
   std::vector<uchar> back_status;
   std::vector<float> back_err;
-  cv::calcOpticalFlowPyrLK(
-      curr_gray, prev_gray_, next_pts, back_pts, back_status, back_err,
-      cv::Size(cfg_.win_size, cfg_.win_size), cfg_.max_level,
-      cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01));
+  {
+    KALMAN_PROFILE_ZONE_NAMED_C("FlowTracker::bwd_LK", kalman::profiling::ColorMotion);
+    cv::calcOpticalFlowPyrLK(
+        curr_gray, prev_gray_, next_pts, back_pts, back_status, back_err,
+        cv::Size(cfg_.win_size, cfg_.win_size), cfg_.max_level,
+        cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01));
+  }
 
   // Expanded ROI margin (features near the edge are likely still valid)
   cv::Rect roi_margin(search_roi.x - search_roi.width / 2, search_roi.y - search_roi.height / 2,
@@ -50,18 +59,21 @@ FlowResult FlowTracker::track(const cv::Mat& frame, const cv::Rect& search_roi) 
   displacements.reserve(prev_pts_.size());
   feature_errors.reserve(prev_pts_.size());
 
-  for (size_t i = 0; i < prev_pts_.size(); ++i) {
-    if (!fwd_status[i] || !back_status[i]) continue;
+  {
+    KALMAN_PROFILE_ZONE_NAMED_C("FlowTracker::filter", kalman::profiling::ColorMotion);
+    for (size_t i = 0; i < prev_pts_.size(); ++i) {
+      if (!fwd_status[i] || !back_status[i]) continue;
 
-    float fb_err = std::sqrt(std::pow(next_pts[i].x - back_pts[i].x, 2) +
-                             std::pow(next_pts[i].y - back_pts[i].y, 2));
-    if (fb_err > cfg_.fb_threshold) continue;
+      float fb_err = std::sqrt(std::pow(next_pts[i].x - back_pts[i].x, 2) +
+                               std::pow(next_pts[i].y - back_pts[i].y, 2));
+      if (fb_err > cfg_.fb_threshold) continue;
 
-    if (!roi_margin.contains(next_pts[i])) continue;
+      if (!roi_margin.contains(next_pts[i])) continue;
 
-    valid_next.push_back(next_pts[i]);
-    displacements.push_back(next_pts[i] - prev_pts_[i]);
-    feature_errors.push_back(fb_err);
+      valid_next.push_back(next_pts[i]);
+      displacements.push_back(next_pts[i] - prev_pts_[i]);
+      feature_errors.push_back(fb_err);
+    }
   }
 
   if (static_cast<int>(displacements.size()) < cfg_.min_features) {
@@ -143,6 +155,7 @@ FlowResult FlowTracker::track(const cv::Mat& frame, const cv::Rect& search_roi) 
 }
 
 void FlowTracker::refreshFeatures(const cv::Mat& frame, const cv::Rect& bbox) {
+  KALMAN_PROFILE_ZONE_NAMED_C("FlowTracker::refresh", kalman::profiling::ColorMotion);
   cv::Mat gray;
   if (frame.channels() == 3) {
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);

@@ -18,6 +18,7 @@
 #include "flow_tracker.hpp"
 #include "kalman/core/config_parser.hpp"
 #include "kalman/core/filter.hpp"
+#include "kalman/core/profiling.hpp"
 #include "kalman/models/pixel.hpp"
 
 namespace {
@@ -36,6 +37,7 @@ using Mat42 = Eigen::Matrix<double, 4, 2>;
 // ---------------------------------------------------------------------------
 
 void linearUpdate(Filter& filter, const Vec2& z, const Mat24& H, const Mat2& R) {
+  KALMAN_PROFILE_ZONE_NAMED_C("UKF::linearUpdate", kalman::profiling::ColorCore);
   auto x = filter.getState();
   auto P = filter.getCovariance();
 
@@ -57,6 +59,7 @@ void linearUpdate(Filter& filter, const Vec2& z, const Mat24& H, const Mat2& R) 
 
 cv::Rect computeSearchROI(const Filter::VectorN& state, const Filter::MatrixN& cov,
                           cv::Size frame_size) {
+  KALMAN_PROFILE_ZONE_NAMED_C("VideoTrack::ROI", kalman::profiling::ColorApp);
   double u = state(0);
   double v = state(1);
   double sigma_u = std::max(50.0, 3.0 * std::sqrt(cov(0, 0)));
@@ -231,6 +234,7 @@ void drawHUD(cv::Mat& frame, int frame_idx, double time_s, const Filter::VectorN
 // ===========================================================================
 
 int main(int argc, char** argv) {
+  KALMAN_PROFILE_SET_THREAD_NAME("VideoTrackMain");
   std::string cfg_path = argc > 1 ? argv[1] : "config/video_track.cfg";
   const Config cfg = loadConfig(cfg_path);
 
@@ -340,6 +344,8 @@ int main(int argc, char** argv) {
   int frame_idx = 0;
 
   while (true) {
+    KALMAN_PROFILE_FRAME();
+    const auto frame_t0 = std::chrono::steady_clock::now();
     cv::Mat frame;
     cap >> frame;
     if (frame.empty()) break;
@@ -349,13 +355,17 @@ int main(int argc, char** argv) {
     // ---- KLT optical flow tracking (from frame_{t-1} to frame_t) ----
     FlowResult flow;
     if (initialized && flow_tracker.hasFeatures()) {
+      KALMAN_PROFILE_ZONE_NAMED_C("VideoTrack::KLT_track", kalman::profiling::ColorMotion);
       // State is at predict(t|t-1) from previous frame's end-of-loop predict
       cv::Rect roi = computeSearchROI(filter.getState(), filter.getCovariance(), frame.size());
       flow = flow_tracker.track(frame, roi);
     }
 
     // ---- YOLO detection ----
-    auto target = detector->next(frame);
+    auto target = [&]() -> decltype(detector->next(frame)) {
+      KALMAN_PROFILE_ZONE_NAMED_C("VideoTrack::YOLO_detect", kalman::profiling::ColorVision);
+      return detector->next(frame);
+    }();
     bool has_detection = target.has_value();
 
     // ---- UKF sequential updates ----
@@ -370,14 +380,19 @@ int main(int argc, char** argv) {
         Vec2 z_y(center.x, center.y);
         float conf = target->confidence;
 
-        // Confidence-adaptive measurement noise
-        double conf_scale = 1.0 + cfg.conf_noise_scale * (1.0 - conf);
-        Mat2 R_yolo_eff = R_yolo * conf_scale;
+        Mat2 R_yolo_eff;
+        double mahalanobis_sq = 0.0;
+        {
+          KALMAN_PROFILE_ZONE_NAMED_C("VideoTrack::UKF_gating", kalman::profiling::ColorCore);
 
-        // Innovation gating: reject outlier detections via Mahalanobis distance
-        Vec2 innovation = z_y - H_yolo * filter.getState();
-        Mat2 S_y = H_yolo * filter.getCovariance() * H_yolo.transpose() + R_yolo_eff;
-        double mahalanobis_sq = innovation.transpose() * S_y.ldlt().solve(innovation);
+          // Confidence-adaptive measurement noise
+          R_yolo_eff = R_yolo * (1.0 + cfg.conf_noise_scale * (1.0 - conf));
+
+          // Innovation gating: reject outlier detections via Mahalanobis distance
+          Vec2 innovation = z_y - H_yolo * filter.getState();
+          Mat2 S_y = H_yolo * filter.getCovariance() * H_yolo.transpose() + R_yolo_eff;
+          mahalanobis_sq = innovation.transpose() * S_y.ldlt().solve(innovation);
+        }
 
         if (mahalanobis_sq < cfg.gate_threshold) {
           detection_accepted = true;
@@ -477,6 +492,7 @@ int main(int argc, char** argv) {
 
     // ---- Draw prediction and KLT features ----
     if (initialized) {
+      KALMAN_PROFILE_ZONE_NAMED_C("VideoTrack::draw", kalman::profiling::ColorApp);
       const auto& state = filter.getState();
       const auto& cov = filter.getCovariance();
 
@@ -524,9 +540,12 @@ int main(int argc, char** argv) {
     }
 
     // ---- HUD ----
-    bool has_occlusion = (initialized && !has_detection && flow.valid);
-    drawHUD(frame, frame_idx, time_s, initialized ? filter.getState() : Filter::VectorN::Zero(),
-            has_detection, has_occlusion, flow.num_features, occ_counter);
+    {
+      KALMAN_PROFILE_ZONE_NAMED_C("VideoTrack::HUD", kalman::profiling::ColorApp);
+      bool has_occlusion = (initialized && !has_detection && flow.valid);
+      drawHUD(frame, frame_idx, time_s, initialized ? filter.getState() : Filter::VectorN::Zero(),
+              has_detection, has_occlusion, flow.num_features, occ_counter);
+    }
 
     // ---- Display / write ----
     if (save_video) writer.write(frame);
@@ -546,6 +565,11 @@ int main(int argc, char** argv) {
         if (key == 'q') break;
       }
     }
+
+    const double frame_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_t0)
+            .count();
+    KALMAN_PROFILE_PLOT("frame ms", frame_ms);
 
     ++frame_idx;
   }

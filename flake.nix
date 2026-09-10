@@ -65,6 +65,8 @@
             ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
               pkgs.gdb
               pkgs.valgrind
+              pkgs.linuxPackages.perf
+              pkgs.samply
             ];
 
           kalman-cpp = pkgs.stdenv.mkDerivation {

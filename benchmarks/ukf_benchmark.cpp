@@ -53,7 +53,7 @@ static void BM_Predict_3D(benchmark::State& state) {
     filter.predict(dt);
   }
 }
-BENCHMARK(BM_Predict_3D)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->Iterations(5000)->Repetitions(1);
+BENCHMARK(BM_Predict_3D)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->Iterations(500000)->Repetitions(1);
 
 /// Benchmark the UKF update step for the 9-D 3-D model.
 static void BM_Update_3D(benchmark::State& state) {
@@ -66,7 +66,7 @@ static void BM_Update_3D(benchmark::State& state) {
     filter.update(z);
   }
 }
-BENCHMARK(BM_Update_3D)->Iterations(5000)->Repetitions(1);
+BENCHMARK(BM_Update_3D)->Iterations(500000)->Repetitions(1);
 
 /// Benchmark the combined predict + update (filter) step for the 9-D 3-D model.
 static void BM_Filter_3D(benchmark::State& state) {
@@ -80,7 +80,7 @@ static void BM_Filter_3D(benchmark::State& state) {
     filter.filter(dt, z);
   }
 }
-BENCHMARK(BM_Filter_3D)->Iterations(5000)->Repetitions(1);
+BENCHMARK(BM_Filter_3D)->Iterations(500000)->Repetitions(1);
 
 // -----------------------------------------------------------------------
 //  Pixel-space 4-D CV benchmarks
@@ -97,7 +97,13 @@ static void BM_Predict_Pixel(benchmark::State& state) {
     filter.predict(dt);
   }
 }
-BENCHMARK(BM_Predict_Pixel)->Arg(1)->Arg(10)->Arg(100)->Arg(1000)->Iterations(5000)->Repetitions(1);
+BENCHMARK(BM_Predict_Pixel)
+    ->Arg(1)
+    ->Arg(10)
+    ->Arg(100)
+    ->Arg(1000)
+    ->Iterations(500000)
+    ->Repetitions(1);
 
 /// Benchmark the UKF update step for the 4-D pixel-space model.
 static void BM_Update_Pixel(benchmark::State& state) {
@@ -110,7 +116,7 @@ static void BM_Update_Pixel(benchmark::State& state) {
     filter.update(z);
   }
 }
-BENCHMARK(BM_Update_Pixel)->Iterations(5000)->Repetitions(1);
+BENCHMARK(BM_Update_Pixel)->Iterations(500000)->Repetitions(1);
 
 /// Benchmark the combined predict + update for the 4-D pixel-space model.
 static void BM_Filter_Pixel(benchmark::State& state) {
@@ -124,6 +130,22 @@ static void BM_Filter_Pixel(benchmark::State& state) {
     filter.filter(dt, z);
   }
 }
-BENCHMARK(BM_Filter_Pixel)->Iterations(5000)->Repetitions(1);
+BENCHMARK(BM_Filter_Pixel)->Iterations(500000)->Repetitions(1);
+
+// -----------------------------------------------------------------------
+//  Minimal benchmark for slow profilers (callgrind/cachegrind)
+// -----------------------------------------------------------------------
+
+static void BM_Profile_3D(benchmark::State& state) {
+  Filter3D filter;
+  filter.setState(Filter3D::VectorN::Zero());
+  filter.setCovariance(Filter3D::MatrixN::Identity());
+  auto z = make_measurement_3d();
+
+  for (auto _ : state) {
+    filter.filter(0.01, z);
+  }
+}
+BENCHMARK(BM_Profile_3D)->Iterations(200000)->Repetitions(1);
 
 BENCHMARK_MAIN();

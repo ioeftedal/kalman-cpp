@@ -15,6 +15,7 @@
 
 #include "kalman/core/concepts.hpp"
 #include "kalman/core/fwd.hpp"
+#include "kalman/core/profiling.hpp"
 
 namespace kalman {
 
@@ -85,6 +86,7 @@ class UnscentedKalmanFilter {
   /// If `dt ≤ 0` the call is a no-op.
   void predict(T dt) {
     if (dt <= T(0)) return;
+    KALMAN_PROFILE_ZONE_NAMED_C("UKF::predict", kalman::profiling::ColorCore);
 
     using ModelTag = typename Policy::ModelTag;
     const auto F = ProcessModel<T, N, ModelTag>::F(dt);
@@ -105,6 +107,7 @@ class UnscentedKalmanFilter {
   /// closed-form KF update is used.  For non-linear models the full UKF
   /// sigma-point update is used.
   void update(const VectorM& z) {
+    KALMAN_PROFILE_ZONE_NAMED_C("UKF::update", kalman::profiling::ColorCore);
     MatrixM S;
     MatrixNM K;
 
@@ -181,6 +184,7 @@ class UnscentedKalmanFilter {
 
   /// Convenience: predict then update.
   void filter(T dt, const VectorM& z) {
+    KALMAN_PROFILE_ZONE_NAMED_C("UKF::filter", kalman::profiling::ColorCore);
     predict(dt);
     update(z);
   }
@@ -197,6 +201,7 @@ class UnscentedKalmanFilter {
 
  private:
   void generateSigmaPoints(const VectorN& x, const MatrixN& P, MatrixNX& Xs) const {
+    KALMAN_PROFILE_ZONE_NAMED_C("UKF::generateSigmaPoints", kalman::profiling::ColorCore);
     constexpr T kReg = T(1e-6);
     const T reg = kReg * std::max(T(1), P.trace() / T(N));
     const MatrixN scaledP = (T(N) + lambda_) * (P + reg * MatrixN::Identity());

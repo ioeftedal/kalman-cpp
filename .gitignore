@@ -75,6 +75,10 @@ vcpkg_installed/
 # Generated output data and plots
 output/
 
+# Profiling artifacts
+perf.data
+profile.json.gz
+
 # test output & cache
 Testing/
 .cache/
