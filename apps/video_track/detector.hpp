@@ -37,7 +37,7 @@ class DetectionSource {
 class YOLODetector : public DetectionSource {
  public:
   YOLODetector(const std::string& model_path, float conf_threshold = 0.5f,
-               float nms_threshold = 0.45f);
+               float nms_threshold = 0.45f, int input_size = 640, bool letterbox = true);
 
   std::optional<Detection> next(const cv::Mat& frame) override;
 
@@ -53,6 +53,10 @@ class YOLODetector : public DetectionSource {
   float nms_threshold_;
   int input_width_ = 640;
   int input_height_ = 640;
+  bool letterbox_ = true;
+  float scale_ = 1.0f;                         // letterbox scale (input px per frame px)
+  int pad_x_ = 0;                              // letterbox x offset (input coords)
+  int pad_y_ = 0;                              // letterbox y offset (input coords)
   std::vector<int> target_classes_ = {4, 14};  // COCO: airplane, bird
 };
 

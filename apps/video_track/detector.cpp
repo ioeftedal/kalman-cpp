@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <opencv2/imgproc.hpp>
 #include <sstream>
 
 #include "kalman/core/profiling.hpp"
@@ -12,8 +13,13 @@
 //  YOLODetector
 // ===========================================================================
 
-YOLODetector::YOLODetector(const std::string& model_path, float conf_threshold, float nms_threshold)
-    : conf_threshold_(conf_threshold), nms_threshold_(nms_threshold) {
+YOLODetector::YOLODetector(const std::string& model_path, float conf_threshold, float nms_threshold,
+                           int input_size, bool letterbox)
+    : conf_threshold_(conf_threshold),
+      nms_threshold_(nms_threshold),
+      input_width_(input_size),
+      input_height_(input_size),
+      letterbox_(letterbox) {
   net_ = cv::dnn::readNet(model_path);
   if (net_.empty()) {
     std::fprintf(stderr, "Failed to load ONNX model: %s\n", model_path.c_str());
@@ -37,8 +43,30 @@ std::vector<Detection> YOLODetector::detect(const cv::Mat& frame) {
   cv::Mat blob;
   {
     KALMAN_PROFILE_ZONE_NAMED_C("YOLO::blob", kalman::profiling::ColorVision);
-    blob = cv::dnn::blobFromImage(frame, 1.0f / 255.0f, cv::Size(input_width_, input_height_),
-                                  cv::Scalar(), true, false);
+    if (letterbox_) {
+      // Ultralytics-style letterbox: uniform scale + grey padding. Keeps the
+      // aspect ratio intact (important for wide-format drone footage).
+      const float scale = std::min(static_cast<float>(input_width_) / frame.cols,
+                                   static_cast<float>(input_height_) / frame.rows);
+      const int scaled_w = static_cast<int>(std::round(frame.cols * scale));
+      const int scaled_h = static_cast<int>(std::round(frame.rows * scale));
+      scale_ = scale;
+      pad_x_ = (input_width_ - scaled_w) / 2;
+      pad_y_ = (input_height_ - scaled_h) / 2;
+
+      cv::Mat resized;
+      cv::resize(frame, resized, cv::Size(scaled_w, scaled_h));
+      cv::Mat boxed(cv::Size(input_width_, input_height_), frame.type(), cv::Scalar(114, 114, 114));
+      resized.copyTo(boxed(cv::Rect(pad_x_, pad_y_, scaled_w, scaled_h)));
+      blob = cv::dnn::blobFromImage(boxed, 1.0f / 255.0f, cv::Size(input_width_, input_height_),
+                                    cv::Scalar(), true, false);
+    } else {
+      scale_ = 1.0f;
+      pad_x_ = 0;
+      pad_y_ = 0;
+      blob = cv::dnn::blobFromImage(frame, 1.0f / 255.0f, cv::Size(input_width_, input_height_),
+                                    cv::Scalar(), true, false);
+    }
   }
   net_.setInput(blob);
 
@@ -56,16 +84,12 @@ std::vector<Detection> YOLODetector::detect(const cv::Mat& frame) {
   const int num_detections = outputs[0].size[2];  // 8400
   const int num_channels = outputs[0].size[1];    // 84
 
-  float scale_x = static_cast<float>(frame.cols) / input_width_;
-  float scale_y = static_cast<float>(frame.rows) / input_height_;
-
   // -----------------------------------------------------------------------
   //  3. Parse detections
   // -----------------------------------------------------------------------
   std::vector<cv::Rect> boxes;
   std::vector<float> scores;
   std::vector<int> class_ids;
-  std::vector<int> indices;
 
   {
     KALMAN_PROFILE_ZONE_NAMED_C("YOLO::parse", kalman::profiling::ColorVision);
@@ -95,11 +119,20 @@ std::vector<Detection> YOLODetector::detect(const cv::Mat& frame) {
       float w = data[2 * num_detections + i];
       float h = data[3 * num_detections + i];
 
-      // Scale from network input size to original frame size
-      cx *= scale_x;
-      cy *= scale_y;
-      w *= scale_x;
-      h *= scale_y;
+      // Un-map bbox from the network input grid back to original frame coords
+      if (letterbox_) {
+        cx = (cx - static_cast<float>(pad_x_)) / scale_;
+        cy = (cy - static_cast<float>(pad_y_)) / scale_;
+        w = w / scale_;
+        h = h / scale_;
+      } else {
+        const float sx = static_cast<float>(frame.cols) / static_cast<float>(input_width_);
+        const float sy = static_cast<float>(frame.rows) / static_cast<float>(input_height_);
+        cx *= sx;
+        cy *= sy;
+        w *= sx;
+        h *= sy;
+      }
 
       float x1 = cx - w / 2.0f;
       float y1 = cy - h / 2.0f;

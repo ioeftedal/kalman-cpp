@@ -4,6 +4,7 @@
 #pragma once
 
 #include <Eigen/Core>
+#include <type_traits>
 
 #include "kalman/core/fwd.hpp"
 #include "kalman/kinematics/ca_pixel.hpp"
@@ -23,6 +24,8 @@ struct ProcessModel<T, 4, void> {
 
 struct PixelCATag {};
 
+struct PixelCTTag {};
+
 template <typename T>
 struct ProcessModel<T, 6, PixelCATag> {
   static constexpr auto F(T dt) noexcept { return kinematics::computeF_pixel_CA<T>(dt); }
@@ -30,6 +33,16 @@ struct ProcessModel<T, 6, PixelCATag> {
     return kinematics::computeQ_pixel_CA<T>(dt, q_c);
   }
 };
+
+/// State dimension of each pixel-space model tag, used by the IMM.
+template <typename Tag>
+struct PixelStateDim;
+template <>
+struct PixelStateDim<void> : std::integral_constant<int, 4> {};
+template <>
+struct PixelStateDim<PixelCATag> : std::integral_constant<int, 6> {};
+template <>
+struct PixelStateDim<PixelCTTag> : std::integral_constant<int, 5> {};
 
 // ---------------------------------------------------------------------------
 //  Measurement model policy for 2D pixel-space tracking.
@@ -67,5 +80,6 @@ struct PixelPolicyBase {
 
 using PixelPolicy = PixelPolicyBase<void>;
 using PixelCAPolicy = PixelPolicyBase<PixelCATag>;
+using PixelCTPolicy = PixelPolicyBase<PixelCTTag>;
 
 }  // namespace kalman

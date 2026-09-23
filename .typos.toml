@@ -1,0 +1,6 @@
+# Allow project-specific tokens that would otherwise trip the typos spell
+# checker: the NEES acronym (Normalized Estimation Error Squared), the
+# MixFormerV2-S ONNX tensor name `img_ot`, and the short eval/annotate
+# identifiers.
+[default]
+extend-words = { nees = "nees", ot = "ot", iy = "iy" }
