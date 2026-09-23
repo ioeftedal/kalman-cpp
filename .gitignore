@@ -101,6 +101,7 @@ __pycache__/
 # Doxygen output (OUTPUT_DIRECTORY = docs)
 docs/
 
-# Generated detection model and data
+# Generated detection model and data and videos
 videos/*.onnx
 videos/*.csv
+videos/*.mp4

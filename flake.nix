@@ -58,11 +58,6 @@
               cmake-language-server
               lldb
               bear
-              python3
-              uv
-              typst
-              # Tracy profiler GUI + instrumentation client (pinned by the
-              # nixpkgs-unstable lockfile of this flake).
               tracy
             ])
             ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
