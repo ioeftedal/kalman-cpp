@@ -46,8 +46,7 @@ add_executable(
   video_track main.cpp detector.cpp flow_tracker.cpp global_motion.cpp
               appearance.cpp ${DEEP_TRACK_SOURCES})
 target_link_libraries(video_track kalman ${OpenCV_LIBS})
-target_compile_options(video_track PRIVATE -Wall -Wextra -Wpedantic -Werror
-                                           -Wno-c11-extensions)
+kalman_enable_warnings(video_track -Wno-c11-extensions)
 
 if(DEEP_TRACK_SOURCES)
   target_compile_definitions(video_track PRIVATE KALMAN_ENABLE_DEEP=1)
@@ -59,10 +58,8 @@ if(DEEP_TRACK_SOURCES)
 endif()
 
 add_executable(video_track_eval eval.cpp)
-target_compile_options(video_track_eval PRIVATE -Wall -Wextra -Wpedantic
-                                                -Werror)
+kalman_enable_warnings(video_track_eval)
 
 add_executable(video_track_annotate annotate.cpp)
 target_link_libraries(video_track_annotate ${OpenCV_LIBS})
-target_compile_options(video_track_annotate PRIVATE -Wall -Wextra -Wpedantic
-                                                    -Werror)
+kalman_enable_warnings(video_track_annotate)

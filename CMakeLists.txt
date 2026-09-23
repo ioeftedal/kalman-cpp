@@ -4,10 +4,14 @@ project(kalman LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(KALMAN_BUILD_TESTS "Build the test suite" ON)
+option(KALMAN_BUILD_APPS "Build the demo applications" ON)
+option(KALMAN_BUILD_BENCHMARKS "Build the benchmarks" ON)
+
 option(KALMAN_PROFILING
        "Enable profiling build (optimized + debug symbols + frame pointer)" OFF)
 option(KALMAN_USE_TRACY
-       "Enable Tracy profiler instrumentation (implies KALMAN_PROFILING)" OFF)
+       "Enable Tracy profiler instrumentation (implies KALMAN_PROFILING)" ON)
 option(KALMAN_TRACY_ON_DEMAND
        "Only collect Tracy data while a profiler is connected" OFF)
 set(KALMAN_TRACY_CALLSTACK
@@ -26,18 +30,17 @@ if(KALMAN_PROFILING OR KALMAN_USE_TRACY)
   endif()
 endif()
 
-enable_testing()
+if(KALMAN_BUILD_TESTS)
+  enable_testing()
+endif()
+
+# Shared warning policy for every target.
+function(kalman_enable_warnings target)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror
+                                           ${ARGN})
+endfunction()
 
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
-find_package(
-  OpenCV 4 REQUIRED
-  COMPONENTS core
-             imgproc
-             imgcodecs
-             videoio
-             video
-             highgui
-             dnn)
 
 # Tracy profiler dependency. Prefer an installed Tracy (e.g. the pinned nixpkgs
 # `tracy` in the dev shell); otherwise fetch the pinned release archive so the
@@ -70,10 +73,29 @@ endif()
 
 add_subdirectory(src)
 
-add_subdirectory(apps)
+if(KALMAN_BUILD_APPS OR KALMAN_BUILD_TESTS)
+  # OpenCV is used by the video_track app and by the app unit tests.
+  find_package(
+    OpenCV 4 REQUIRED
+    COMPONENTS core
+               imgproc
+               imgcodecs
+               videoio
+               video
+               highgui
+               dnn)
+endif()
 
-find_package(GTest 1.17 REQUIRED)
-add_subdirectory(tests)
+if(KALMAN_BUILD_APPS)
+  add_subdirectory(apps)
+endif()
 
-find_package(benchmark 1.9 REQUIRED)
-add_subdirectory(benchmarks)
+if(KALMAN_BUILD_TESTS)
+  find_package(GTest 1.17 REQUIRED)
+  add_subdirectory(tests)
+endif()
+
+if(KALMAN_BUILD_BENCHMARKS)
+  find_package(benchmark 1.9 REQUIRED)
+  add_subdirectory(benchmarks)
+endif()

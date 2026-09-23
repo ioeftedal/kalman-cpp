@@ -92,7 +92,10 @@
               src = self;
               hooks = {
                 clang-format.enable = true;
-                clang-tidy.enable = true;
+                # clang-tidy is intentionally NOT a pre-commit hook: its
+                # `--fix` mode misplaces FixIts on headers when run batch-wise
+                # (corrupting files). It runs instead as a read-only CI check
+                # against the exported compilation database (see .github/).
                 cmake-format.enable = true;
                 nixfmt.enable = true;
                 deadnix.enable = true;
