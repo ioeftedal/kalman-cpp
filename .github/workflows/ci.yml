@@ -1,0 +1,90 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: build (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      CC: ${{ matrix.compiler == 'clang' && 'clang' || 'gcc' }}
+      CXX: ${{ matrix.compiler == 'clang' && 'clang++' || 'g++' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libeigen3-dev libopencv-dev \
+            libbenchmark-dev
+          # Ubuntu's libgtest-dev ships sources only; build + install gtest.
+          sudo apt-get install -y libgtest-dev
+          cmake -S /usr/src/googletest -B /tmp/gtest -DBUILD_GMOCK=OFF
+          cmake --build /tmp/gtest -j"$(nproc)"
+          sudo cmake --install /tmp/gtest
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          # The gcc build exercises the default KALMAN_USE_TRACY=ON path
+          # (pinned FetchContent vendoring); clang uses Tracy off so the
+          # read-only clang-tidy step stays fast and offline.
+          ${{ matrix.compiler == 'clang' && '-DKALMAN_USE_TRACY=OFF' || '' }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Read-only clang-tidy
+        if: matrix.compiler == 'clang'
+        run: |
+          sudo apt-get install -y clang-tidy
+          python3 - <<'EOF' > /tmp/tidy_files.txt
+          import json
+          db = json.load(open("build/compile_commands.json"))
+          print("\n".join(e["file"] for e in db if "/build/" not in e["file"]))
+          EOF
+          clang-tidy -p build --quiet $(cat /tmp/tidy_files.txt) \
+            > /tmp/tidy.log 2>&1 || true
+          if grep -q ': error:' /tmp/tidy.log; then
+            cat /tmp/tidy.log >&2
+            echo "::error::clang-tidy reported hard errors"
+            exit 1
+          fi
+          n=$(grep -c 'warning:' /tmp/tidy.log || true)
+          echo "$n advisory warning(s) (non-blocking; see summary above)"
+
+  lint:
+    name: lint (format + typos)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install formatters
+        run: |
+          sudo apt-get install -y clang-format-18
+          pip install cmakeformat
+
+      - name: clang-format
+        run: |
+          clang-format-18 --dry-run --Werror $(git ls-files '*.cpp' '*.hpp')
+
+      - name: cmake-format
+        run: >
+          cmake-format --check $(git ls-files 'CMakeLists.txt'
+          '**/CMakeLists.txt' '*.cmake' '**/*.cmake')
+
+      - name: typos
+        uses: crate-ci/typos@v1
