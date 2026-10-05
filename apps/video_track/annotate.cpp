@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include "headless.hpp"
+
 namespace {
 
 struct Point {
@@ -238,6 +240,12 @@ int main(int argc, char** argv) {
   }
 
   const std::string win = "annotate";
+  if (!video_track::guiAvailable()) {
+    std::fprintf(stderr,
+                 "error: annotate needs an interactive display, but none is "
+                 "available (headless OpenCV build or no DISPLAY/WAYLAND_DISPLAY)\n");
+    return 1;
+  }
   cv::namedWindow(win, cv::WINDOW_AUTOSIZE);
 
   struct Pt {

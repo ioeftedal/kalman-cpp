@@ -18,6 +18,7 @@
 #include "detector.hpp"
 #include "flow_tracker.hpp"
 #include "global_motion.hpp"
+#include "headless.hpp"
 #ifdef KALMAN_ENABLE_DEEP
 #include "deep_tracker.hpp"
 #endif
@@ -251,6 +252,7 @@ struct LogEntry {
 };
 
 void writeLog(const std::string& path, const std::vector<LogEntry>& entries) {
+  video_track::ensureParentDir(path);
   FILE* csv = std::fopen(path.c_str(), "w");
   if (csv == nullptr) {
     std::fprintf(stderr, "Failed to open '%s'\n", path.c_str());
@@ -282,6 +284,7 @@ struct DeepRawEntry {
 };
 
 void writeDeepLog(const std::string& path, const std::vector<DeepRawEntry>& entries) {
+  video_track::ensureParentDir(path);
   FILE* csv = std::fopen(path.c_str(), "w");
   if (!csv) {
     std::fprintf(stderr, "Failed to open '%s'\n", path.c_str());
@@ -493,12 +496,38 @@ int main(int argc, char** argv) {
   cv::VideoWriter writer;
   bool save_video = !cfg.output_video.empty();
   if (save_video) {
-    int fourcc = cv::VideoWriter::fourcc('m', 'p', '4', 'v');
-    writer.open(cfg.output_video, fourcc, fps, cv::Size(width, height));
+    video_track::ensureParentDir(cfg.output_video);
+    // Codecs in decreasing order of preference: mp4v is always available in
+    // FFmpeg builds, avc1/H.264 is smaller, MJPG is the last-resort fallback.
+    // Without this loop a headless box with a stripped FFmpeg build would end
+    // up with no video at all.
+    static const char* kCodecs[] = {"mp4v", "avc1", "MJPG"};
+    for (const char* codec : kCodecs) {
+      const int fourcc = cv::VideoWriter::fourcc(codec[0], codec[1], codec[2], codec[3]);
+      writer.open(cfg.output_video, fourcc, fps, cv::Size(width, height));
+      if (writer.isOpened()) {
+        std::printf("  video writer    = %s\n", codec);
+        break;
+      }
+    }
     if (!writer.isOpened()) {
-      std::fprintf(stderr, "Warning: could not open VideoWriter\n");
+      std::fprintf(stderr,
+                   "Warning: could not open VideoWriter for %s "
+                   "(tried mp4v/avc1/MJPG)\n",
+                   cfg.output_video.c_str());
       save_video = false;
     }
+  }
+
+  // A headless build or an unreachable X/Wayland session must not abort the
+  // run: downgrade display to off instead.
+  bool show_display = cfg.show_display;
+  if (show_display && !video_track::guiAvailable()) {
+    std::fprintf(stderr,
+                 "Warning: show_display requested but no GUI is available "
+                 "(headless OpenCV build or no DISPLAY/WAYLAND_DISPLAY); "
+                 "continuing without display\n");
+    show_display = false;
   }
 
   // -----------------------------------------------------------------------
@@ -915,26 +944,33 @@ int main(int argc, char** argv) {
     if (save_video) {
       writer.write(frame);
     }
-    if (cfg.show_display) {
-      cv::imshow("YOLO + UKF: Helicopter Tracking", frame);
-      int key = cv::waitKey(1) & 0xFF;
-      if (key == 'q') {
-        break;
-      }
-      if (key == 'p') {
-        paused = !paused;
-        while (paused) {
-          int k = cv::waitKey(30) & 0xFF;
-          if (k == 'p' || k == 'q') {
-            paused = false;
-            if (k == 'q') {
-              break;
-            }
-          }
-        }
+    if (show_display) {
+      // The window backend can still fail at imshow time (stale DISPLAY, no
+      // window manager, ...); drop to headless instead of propagating.
+      try {
+        cv::imshow("YOLO + UKF: Helicopter Tracking", frame);
+        int key = cv::waitKey(1) & 0xFF;
         if (key == 'q') {
           break;
         }
+        if (key == 'p') {
+          paused = !paused;
+          while (paused) {
+            int k = cv::waitKey(30) & 0xFF;
+            if (k == 'p' || k == 'q') {
+              paused = false;
+              if (k == 'q') {
+                break;
+              }
+            }
+          }
+          if (key == 'q') {
+            break;
+          }
+        }
+      } catch (const cv::Exception& e) {
+        std::fprintf(stderr, "Warning: display unavailable (%s); continuing headless\n", e.what());
+        show_display = false;
       }
     }
 
@@ -953,7 +989,7 @@ int main(int argc, char** argv) {
   if (save_video) {
     writer.release();
   }
-  if (cfg.show_display) {
+  if (show_display) {
     cv::destroyAllWindows();
   }
 
