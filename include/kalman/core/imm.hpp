@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <deque>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -69,6 +68,11 @@ class ImmFilter {
   //  Configuration
   // ---------------------------------------------------------------------
 
+  /// Largest `window` accepted by `setAdaptiveNoise`. The adaptive-noise
+  /// history is a fixed-capacity ring buffer rather than a std::deque so that
+  /// update() never allocates; longer windows are clamped to this value.
+  static constexpr int kMaxAdaptWindow = 256;
+
   /// Uniform off-diagonal transition probability `p`; diagonal = 1 - p·(N-1).
   void setTransitionProbabilities(T p) {
     Pi_.setConstant(p);
@@ -93,9 +97,10 @@ class ImmFilter {
   /// innovation (== measurement dimension).
   void setAdaptiveNoise(bool on, int window = 30, T target = T(2)) {
     adaptive_ = on;
-    adapt_window_ = window;
+    adapt_window_ = std::min(std::max(window, 1), kMaxAdaptWindow);
     adapt_target_ = target;
-    gate_hist_.clear();
+    gate_head_ = 0;
+    gate_count_ = 0;
   }
 
   /// Turn-rate prior (rad/s) injected into the CT model before every predict.
@@ -116,7 +121,8 @@ class ImmFilter {
     }
     mu_.setConstant(T(1) / T(NumModels));
     cbar_ = mu_;
-    gate_hist_.clear();
+    gate_head_ = 0;
+    gate_count_ = 0;
     noise_scale_ = T(1);
     fused_ = x4;
     fused_cov_ = P4;
@@ -200,9 +206,10 @@ class ImmFilter {
 
     // 6. Adapt measurement noise from the innovation history.
     if (adaptive_) {
-      gate_hist_.push_back(last_gate_);
-      if (static_cast<int>(gate_hist_.size()) > adapt_window_) {
-        gate_hist_.pop_front();
+      gate_hist_[gate_head_] = last_gate_;
+      gate_head_ = (gate_head_ + 1) % kMaxAdaptWindow;
+      if (gate_count_ < kMaxAdaptWindow) {
+        ++gate_count_;
       }
       updateAdaptiveScale();
     }
@@ -412,17 +419,21 @@ class ImmFilter {
     });
   }
 
-  template <typename FilterType, typename HMat>
-  static void linearUpdate(FilterType& f, const VectorM& z, const HMat& H, const MatrixM& R) {
+  // `N` is the per-model state dimension, deduced from `H` (callers pass a
+  // fixed-size MeasDim x N measurement Jacobian). Deducing it keeps the gain
+  // stack-allocated -- a Dynamic-typed K would malloc on every update, which
+  // breaks the allocation-free guarantee real-time consumers depend on.
+  template <typename FilterType, int N>
+  static void linearUpdate(FilterType& f, const VectorM& z, const Eigen::Matrix<T, MeasDim, N>& H,
+                           const MatrixM& R) {
     auto x = f.getState();
     auto P = f.getCovariance();
     const VectorM nu = z - H * x;
     const MatrixM S = R + H * P * H.transpose();
     // Materialise the LDLT solve: `auto K = S.ldlt().solve(...).transpose()` would
     // keep a reference to a temporary LDLT and read freed memory on K * nu.
-    const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> Kt =
-        S.ldlt().solve((P * H.transpose()).transpose());
-    const auto K = Kt.transpose();
+    const Eigen::Matrix<T, MeasDim, N> Kt = S.ldlt().solve((P * H.transpose()).transpose());
+    const Eigen::Matrix<T, N, MeasDim> K = Kt.transpose();
     x = x + K * nu;
     P = P - K * S * K.transpose();
     enforcePDS(P);
@@ -476,14 +487,17 @@ class ImmFilter {
   }
 
   void updateAdaptiveScale() {
-    if (static_cast<int>(gate_hist_.size()) < adapt_window_) {
+    if (gate_count_ < adapt_window_) {
       return;
     }
+    // Walk the live entries of the ring buffer. Once the buffer has wrapped,
+    // the oldest sample is at gate_head_; before that it sits at index 0.
     T mean = T(0);
-    for (const T d : gate_hist_) {
-      mean += d;
+    const int start = (gate_count_ == kMaxAdaptWindow) ? gate_head_ : 0;
+    for (int i = 0; i < gate_count_; ++i) {
+      mean += gate_hist_[(start + i) % kMaxAdaptWindow];
     }
-    mean /= static_cast<T>(gate_hist_.size());
+    mean /= static_cast<T>(gate_count_);
     const T lo = adapt_target_ * T(0.5);
     const T hi = adapt_target_ * T(1.5);
     if (mean > hi) {
@@ -507,7 +521,11 @@ class ImmFilter {
   T adapt_target_ = T(2);
   T noise_scale_ = T(1);
   T last_gate_ = T(0);
-  std::deque<T> gate_hist_;
+  // Ring buffer of recent normalised innovation distances. `gate_head_` is the
+  // next write index; `gate_count_` is how many entries are live.
+  std::array<T, kMaxAdaptWindow> gate_hist_{};
+  int gate_head_ = 0;
+  int gate_count_ = 0;
   VectorC fused_;
   MatrixC fused_cov_;
 };
