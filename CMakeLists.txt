@@ -7,14 +7,34 @@ project(
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(KALMAN_BUILD_TESTS "Build the test suite" ON)
-option(KALMAN_BUILD_APPS "Build the demo applications" ON)
-option(KALMAN_BUILD_BENCHMARKS "Build the benchmarks" ON)
+# Component defaults. When kalman is the top-level project, build everything by
+# default (friendly developer experience). When it is consumed as a subproject
+# (add_subdirectory / FetchContent) the defaults flip to OFF so consumers are
+# not forced to satisfy OpenCV / GTest / benchmark / Tracy dependencies they do
+# not need. Explicit -D overrides always win.
+if(PROJECT_IS_TOP_LEVEL)
+  set(KALMAN_DEFAULT_BUILD_TESTS ON)
+  set(KALMAN_DEFAULT_BUILD_APPS ON)
+  set(KALMAN_DEFAULT_BUILD_BENCHMARKS ON)
+  set(KALMAN_DEFAULT_USE_TRACY ON)
+else()
+  set(KALMAN_DEFAULT_BUILD_TESTS OFF)
+  set(KALMAN_DEFAULT_BUILD_APPS OFF)
+  set(KALMAN_DEFAULT_BUILD_BENCHMARKS OFF)
+  set(KALMAN_DEFAULT_USE_TRACY OFF)
+endif()
+
+option(KALMAN_BUILD_TESTS "Build the test suite" ${KALMAN_DEFAULT_BUILD_TESTS})
+option(KALMAN_BUILD_APPS "Build the demo applications"
+       ${KALMAN_DEFAULT_BUILD_APPS})
+option(KALMAN_BUILD_BENCHMARKS "Build the benchmarks"
+       ${KALMAN_DEFAULT_BUILD_BENCHMARKS})
 
 option(KALMAN_PROFILING
        "Enable profiling build (optimized + debug symbols + frame pointer)" OFF)
 option(KALMAN_USE_TRACY
-       "Enable Tracy profiler instrumentation (implies KALMAN_PROFILING)" ON)
+       "Enable Tracy profiler instrumentation (implies KALMAN_PROFILING)"
+       ${KALMAN_DEFAULT_USE_TRACY})
 option(KALMAN_TRACY_ON_DEMAND
        "Only collect Tracy data while a profiler is connected" OFF)
 set(KALMAN_TRACY_CALLSTACK
@@ -59,6 +79,9 @@ if(KALMAN_USE_TRACY)
         SHA256=d4efc50ebcb0bfcfdbba148995aeb75044c0d80f5d91223aebfaa8fa9e563d2b
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
     FetchContent_MakeAvailable(tracy)
+    # Tracy::TracyClient is a build-tree-only target: it cannot be referenced
+    # from an installed/exported package (see src/CMakeLists.txt).
+    set(KALMAN_TRACY_FETCHED TRUE)
     # Tracy is not clean under the project's strict -Werror flags (inherited via
     # CXXFLAGS) on recent compilers; relax only for Tracy.
     if(TARGET TracyClient)

@@ -63,7 +63,7 @@
             ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
               pkgs.gdb
               pkgs.valgrind
-              pkgs.linuxPackages.perf
+              pkgs.perf
               pkgs.samply
             ];
 
@@ -79,6 +79,14 @@
             cmakeFlags = [
               "-DCMAKE_BUILD_TYPE=Release"
               "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+              # Ship a clean, consumable library package: no Tracy (which would
+              # otherwise pull a build-tree-only dependency into the export set),
+              # and no OpenCV / GTest / benchmark / app code in the consumer build.
+              "-DKALMAN_USE_TRACY=OFF"
+              "-DKALMAN_BUILD_APPS=OFF"
+              "-DKALMAN_BUILD_TESTS=OFF"
+              "-DKALMAN_BUILD_BENCHMARKS=OFF"
+              "-DKALMAN_INSTALL=ON"
             ];
 
             CXXFLAGS = [ "-std=c++17" ];
