@@ -497,23 +497,41 @@ int main(int argc, char** argv) {
   bool save_video = !cfg.output_video.empty();
   if (save_video) {
     video_track::ensureParentDir(cfg.output_video);
-    // Codecs in decreasing order of preference: mp4v is always available in
-    // FFmpeg builds, avc1/H.264 is smaller, MJPG is the last-resort fallback.
-    // Without this loop a headless box with a stripped FFmpeg build would end
-    // up with no video at all.
-    static const char* kCodecs[] = {"mp4v", "avc1", "MJPG"};
-    for (const char* codec : kCodecs) {
+    // Codecs in decreasing order of preference. avc1/H.264 comes first because
+    // it is the only MP4 codec every mainstream browser plays; MPEG-4 Part 2
+    // (mp4v) is rejected by Firefox/Chrome/Safari with "no video with supported
+    // format and mime type found". mp4v stays as the fallback for FFmpeg builds
+    // without an H.264 encoder, MJPG as the last resort. Without this loop a
+    // headless box with a stripped FFmpeg build would end up with no video at
+    // all.
+    static const char* kCodecs[] = {"avc1", "mp4v", "MJPG"};
+    // True when the resulting file plays in a browser (Firefox/Chrome/Safari).
+    static const bool kPlayable[] = {true, false, false};
+    static const char* kLabels[] = {"avc1 (H.264)", "mp4v (MPEG-4 Part 2)", "MJPG"};
+    int chosen = -1;
+    for (int i = 0; i < 3; ++i) {
+      const char* codec = kCodecs[i];
       const int fourcc = cv::VideoWriter::fourcc(codec[0], codec[1], codec[2], codec[3]);
       writer.open(cfg.output_video, fourcc, fps, cv::Size(width, height));
       if (writer.isOpened()) {
-        std::printf("  video writer    = %s\n", codec);
+        chosen = i;
         break;
       }
     }
-    if (!writer.isOpened()) {
+    if (chosen >= 0) {
+      std::printf("  video writer    = %s\n", kLabels[chosen]);
+      if (!kPlayable[chosen]) {
+        std::fprintf(stderr,
+                     "Warning: %s was written with %s, which browsers cannot play "
+                     "(\"no video with supported format and mime type found\"); "
+                     "open it in VLC/mpv instead, or install an FFmpeg build with "
+                     "an H.264 encoder\n",
+                     cfg.output_video.c_str(), kLabels[chosen]);
+      }
+    } else {
       std::fprintf(stderr,
                    "Warning: could not open VideoWriter for %s "
-                   "(tried mp4v/avc1/MJPG)\n",
+                   "(tried avc1/mp4v/MJPG)\n",
                    cfg.output_video.c_str());
       save_video = false;
     }
