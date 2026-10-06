@@ -213,24 +213,125 @@ ctest --test-dir build --output-on-failure
 ./build/benchmarks/ukf_benchmark
 ```
 
-The default build enables Tracy instrumentation (`KALMAN_USE_TRACY=ON`); the pinned Tracy source is vendored via FetchContent, so no network happens during the build itself after configure. Disable with `-DKALMAN_USE_TRACY=OFF` for a lighter build.
+The default build enables Tracy instrumentation (`KALMAN_USE_TRACY=ON`); the pinned Tracy source is vendored via FetchContent, so no network happens during the build itself after configure. Disable with `-DKALMAN_USE_TRACY=OFF` for a lighter build. When kalman is consumed **as a subproject** (see below), all component defaults flip to OFF so the consumer is not forced to pull in OpenCV/GTest/benchmark/Tracy.
 
 **Component options:**
 
 | Option | Default | Effect |
 |---|---|---|
-| `KALMAN_BUILD_TESTS` | ON | Build GTest suite |
-| `KALMAN_BUILD_APPS` | ON | Build `video_track` and tools |
-| `KALMAN_BUILD_BENCHMARKS` | ON | Build benchmarks |
-| `KALMAN_USE_TRACY` | ON | Tracy instrumentation (`-O2 -g -march=native`) |
+| `KALMAN_BUILD_TESTS` | ON (top-level) / OFF (subproject) | Build GTest suite |
+| `KALMAN_BUILD_APPS` | ON (top-level) / OFF (subproject) | Build `video_track` and tools |
+| `KALMAN_BUILD_BENCHMARKS` | ON (top-level) / OFF (subproject) | Build benchmarks |
+| `KALMAN_INSTALL` | ON (top-level) / OFF (subproject) | Generate install/export rules for the CMake package |
+| `KALMAN_USE_TRACY` | ON (top-level) / OFF (subproject) | Tracy instrumentation (`-O2 -g -march=native`) |
 | `KALMAN_TRACY_ON_DEMAND` | OFF | Only record while a profiler is connected |
 | `KALMAN_ENABLE_ONNXRUNTIME` | OFF | Build `deep_tracker` backend (requires `ONNXRUNTIME_DIR`) |
+
+### Using the library in another project
+
+The core filtering code (`include/kalman/core`, `include/kalman/models`) has **no
+dependency on OpenCV or video I/O** — the detector, frame capture, and rendering
+all live in `apps/video_track/`. This makes the library easy to drop into a
+project that brings its own detector (and runs live, from a camera stream rather
+than a video file): your detector only has to emit (u, v) measurements plus a
+per-measurement noise covariance, and the filter does the prediction.
+
+**Option A — FetchContent / add_subdirectory**
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(kalman
+  GIT_REPOSITORY https://github.com/ioeftedal/kalman-cpp
+  GIT_TAG <release-or-commit>
+  GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(kalman)
+target_link_libraries(your_app PRIVATE kalman::kalman)
+```
+
+Or vendor it as a git submodule and use `add_subdirectory(kalman-cpp)`. In both
+cases only Eigen3 ≥ 3.4 is needed at configure time — apps, tests, benchmarks,
+and Tracy all default to OFF for a subproject.
+
+**Option B — find_package**
+
+Build and install it once (Tracy must be off, so the export set stays clean):
+
+```bash
+cmake -S kalman-cpp -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DKALMAN_USE_TRACY=OFF \
+  -DKALMAN_BUILD_APPS=OFF -DKALMAN_BUILD_TESTS=OFF -DKALMAN_BUILD_BENCHMARKS=OFF
+cmake --install build --prefix /path/to/install/prefix
+```
+
+```cmake
+find_package(kalman REQUIRED)
+find_package(Eigen3 3.4 REQUIRED NO_MODULE)
+target_link_libraries(your_app PRIVATE kalman::kalman)   # -DCMAKE_PREFIX_PATH=/path/to/install/prefix
+```
+
+`nix build` produces the equivalent package via the flake.
+
+**Live prediction loop with your own detections**
+
+```cpp
+#include <kalman/core/imm.hpp>
+#include <kalman/models/pixel.hpp>
+
+using ImmCvModel = kalman::ImmPixelModel<double, void>;               // CV
+using ImmCaModel = kalman::ImmPixelModel<double, kalman::PixelCATag>; // CA
+using ImmCtModel = kalman::ImmPixelModel<double, kalman::PixelCTTag>; // CT
+using PixelIMM = kalman::ImmFilter<double, ImmCvModel, ImmCaModel, ImmCtModel>;
+
+PixelIMM imm;
+imm.setTransitionProbabilities(0.02);
+imm.setProcessNoiseSpectralDensities({2000.0, 4000.0, 2500.0});
+imm.setAdaptiveNoise(true, /* window= */ 30, /* target= */ 2.0);
+
+// Seed once, from your first detection (u, v): common state [u, v, vu, vv]
+PixelIMM::VectorC x0;
+x0 << u_px, v_px, 0.0, 0.0;
+PixelIMM::MatrixC P0 = PixelIMM::MatrixC::Identity();
+P0(0, 0) = P0(1, 1) = std::pow(10 * sigma_px, 2);   // position uncertainty
+P0(2, 2) = P0(3, 3) = std::pow(200.0, 2);           // velocity uncertainty
+imm.initialize(x0, P0);
+
+auto last = std::chrono::steady_clock::now();
+while (running) {
+  auto det = your_detector.next(frame);   // your detector, live frames
+  auto now = std::chrono::steady_clock::now();
+  const double dt = std::chrono::duration<double>(now - last).count();
+  last = now;
+
+  imm.predict(dt);                        // mode mixing + time propagation
+
+  if (det) {
+    PixelIMM::VectorM z;
+    z << det.center_u, det.center_v;
+    PixelIMM::MatrixM R;
+    R << sigma_px * sigma_px, 0.0, 0.0, sigma_px * sigma_px;
+    if (imm.update(z, R, /* gate= */ 9.21)) {
+      // accepted measurement
+    }                                       // else: gated out -> coast
+  }
+  // No detection this frame? predict() still extrapolates the state.
+  const auto x = imm.getState();          // fused [u, v, vu, vv]
+  const auto P = imm.getCovariance();
+}
+```
+
+For a single-model filter, swap the IMM for
+`UnscentedKalmanFilter<double, 4, 2, kalman::PixelPolicy>` and call
+`predict(dt)` / `update(z)` directly (closed-form KF update, linear model). The
+`filter.hpp` and `imm.hpp` headers are header-only, so any scalar type (`double`,
+`float`) and any policy from `models/` or your own custom model (see
+"Adding a model") compile where they are used.
 
 ### Nix
 
 ```bash
 nix develop          # dev shell with all dependencies + pre-commit hooks
-nix build            # build the library
+nix build            # build + install the library (consumable via find_package)
 ```
 
 Pre-commit hooks (clang-format, cmake-format, deadnix, nixfmt, typos) run automatically when committing inside the dev shell.
