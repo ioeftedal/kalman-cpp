@@ -24,14 +24,20 @@ std::atomic<std::size_t> g_new_count{0};
 std::atomic<std::size_t> g_malloc_count{0};
 #endif
 
-void bumpNew() noexcept { g_new_count.fetch_add(1, std::memory_order_relaxed); }
+void bumpNew() noexcept {
+  g_new_count.fetch_add(1, std::memory_order_relaxed);
+}
 
 #if defined(KALMAN_TEST_WRAP_MALLOC)
-void bumpMalloc() noexcept { g_malloc_count.fetch_add(1, std::memory_order_relaxed); }
+void bumpMalloc() noexcept {
+  g_malloc_count.fetch_add(1, std::memory_order_relaxed);
+}
 #endif
 
 /// std::aligned_alloc requires the size to be a multiple of the alignment.
-std::size_t roundUp(std::size_t n, std::size_t a) noexcept { return ((n + a - 1) / a) * a; }
+std::size_t roundUp(std::size_t n, std::size_t a) noexcept {
+  return ((n + a - 1) / a) * a;
+}
 
 }  // namespace
 
@@ -67,14 +73,28 @@ void* operator new(std::size_t n) {
   throw std::bad_alloc();
 }
 
-void* operator new[](std::size_t n) { return ::operator new(n); }
+void* operator new[](std::size_t n) {
+  return ::operator new(n);
+}
 
-void operator delete(void* p) noexcept { std::free(p); }
-void operator delete[](void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
-void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
-void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete(void* p) noexcept {
+  std::free(p);
+}
+void operator delete[](void* p) noexcept {
+  std::free(p);
+}
+void operator delete(void* p, std::size_t) noexcept {
+  std::free(p);
+}
+void operator delete[](void* p, std::size_t) noexcept {
+  std::free(p);
+}
+void operator delete(void* p, const std::nothrow_t&) noexcept {
+  std::free(p);
+}
+void operator delete[](void* p, const std::nothrow_t&) noexcept {
+  std::free(p);
+}
 
 void* operator new(std::size_t n, std::align_val_t a) {
   bumpNew();
@@ -85,14 +105,30 @@ void* operator new(std::size_t n, std::align_val_t a) {
   throw std::bad_alloc();
 }
 
-void* operator new[](std::size_t n, std::align_val_t a) { return ::operator new(n, a); }
+void* operator new[](std::size_t n, std::align_val_t a) {
+  return ::operator new(n, a);
+}
 
-void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
-void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
-void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
-void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t) noexcept {
+  std::free(p);
+}
+void operator delete[](void* p, std::align_val_t) noexcept {
+  std::free(p);
+}
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept {
+  std::free(p);
+}
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept {
+  std::free(p);
+}
+void operator delete(void* p, std::align_val_t,
+                     const std::nothrow_t&) noexcept {
+  std::free(p);
+}
+void operator delete[](void* p, std::align_val_t,
+                       const std::nothrow_t&) noexcept {
+  std::free(p);
+}
 
 // ---------------------------------------------------------------------------
 //  malloc family interposition -- only when KALMAN_TEST_WRAP_MALLOC is defined
@@ -112,7 +148,9 @@ extern "C" void* __wrap_malloc(std::size_t n) {
   return __real_malloc(n);
 }
 
-extern "C" void __wrap_free(void* p) { __real_free(p); }
+extern "C" void __wrap_free(void* p) {
+  __real_free(p);
+}
 
 extern "C" void* __wrap_calloc(std::size_t n, std::size_t s) {
   bumpMalloc();

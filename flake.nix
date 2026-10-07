@@ -1,5 +1,5 @@
 {
-  description = "Kalman filter C++ library";
+  description = "Single-target pixel-space Kalman tracker (40 Hz drone ROI prediction)";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
@@ -47,8 +47,6 @@
           buildInputs = with pkgs; [
             eigen
             gtest
-            gbenchmark
-            opencv
           ];
 
           # Development-only tools
@@ -58,7 +56,6 @@
               cmake-language-server
               lldb
               bear
-              tracy
             ])
             ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
               pkgs.gdb
@@ -69,7 +66,7 @@
 
           kalman-cpp = pkgs.stdenv.mkDerivation {
             pname = "kalman-cpp";
-            version = "0.1.0";
+            version = "0.2.0";
 
             src = self;
 
@@ -79,13 +76,9 @@
             cmakeFlags = [
               "-DCMAKE_BUILD_TYPE=Release"
               "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
-              # Ship a clean, consumable library package: no Tracy (which would
-              # otherwise pull a build-tree-only dependency into the export set),
-              # and no OpenCV / GTest / benchmark / app code in the consumer build.
-              "-DKALMAN_USE_TRACY=OFF"
-              "-DKALMAN_BUILD_APPS=OFF"
+              # Ship a clean, consumable library package: header-only, no
+              # tests or examples in the consumer build.
               "-DKALMAN_BUILD_TESTS=OFF"
-              "-DKALMAN_BUILD_BENCHMARKS=OFF"
               "-DKALMAN_INSTALL=ON"
             ];
 
@@ -102,12 +95,11 @@
                 clang-format.enable = true;
                 # clang-tidy is intentionally NOT a pre-commit hook: its
                 # `--fix` mode misplaces FixIts on headers when run batch-wise
-                # (corrupting files). It runs instead as a read-only CI check
-                # against the exported compilation database (see .github/).
+                # (corrupting files). Run it ad-hoc against the exported
+                # compilation database instead (build/compile_commands.json).
                 cmake-format.enable = true;
                 nixfmt.enable = true;
                 deadnix.enable = true;
-                typos.enable = true;
               };
             };
           };
@@ -128,8 +120,6 @@
             shellHook = ''
               ${config.checks.pre-commit.shellHook}
               export CMAKE_EXPORT_COMPILE_COMMANDS=ON
-              # Resolve find_package(Tracy) to the pinned nixpkgs tracy.
-              export CMAKE_PREFIX_PATH="${pkgs.tracy}:''${CMAKE_PREFIX_PATH:-}"
             '';
 
             CXXFLAGS = "-std=c++17 -Wall -Wextra -Wpedantic -Werror";

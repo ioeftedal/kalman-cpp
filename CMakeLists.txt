@@ -2,62 +2,30 @@ cmake_minimum_required(VERSION 3.25)
 project(
   kalman
   LANGUAGES CXX
-  VERSION 0.1.0)
+  VERSION 0.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Component defaults. When kalman is the top-level project, build everything by
-# default (friendly developer experience). When it is consumed as a subproject
-# (add_subdirectory / FetchContent) the defaults flip to OFF so consumers are
-# not forced to satisfy OpenCV / GTest / benchmark / Tracy dependencies they do
-# not need. Explicit -D overrides always win.
+# Component defaults: everything for a top-level (developer) build; tests are
+# OFF when kalman is consumed via add_subdirectory / FetchContent so consumers
+# are not forced to provide GTest.  Explicit -D overrides always win.
 if(PROJECT_IS_TOP_LEVEL)
   set(KALMAN_DEFAULT_BUILD_TESTS ON)
-  set(KALMAN_DEFAULT_BUILD_APPS ON)
-  set(KALMAN_DEFAULT_BUILD_BENCHMARKS ON)
-  set(KALMAN_DEFAULT_USE_TRACY ON)
 else()
   set(KALMAN_DEFAULT_BUILD_TESTS OFF)
-  set(KALMAN_DEFAULT_BUILD_APPS OFF)
-  set(KALMAN_DEFAULT_BUILD_BENCHMARKS OFF)
-  set(KALMAN_DEFAULT_USE_TRACY OFF)
 endif()
 
 option(KALMAN_BUILD_TESTS "Build the test suite" ${KALMAN_DEFAULT_BUILD_TESTS})
-option(KALMAN_BUILD_APPS "Build the demo applications"
-       ${KALMAN_DEFAULT_BUILD_APPS})
-option(KALMAN_BUILD_BENCHMARKS "Build the benchmarks"
-       ${KALMAN_DEFAULT_BUILD_BENCHMARKS})
-
-option(KALMAN_PROFILING
-       "Enable profiling build (optimized + debug symbols + frame pointer)" OFF)
-option(KALMAN_USE_TRACY
-       "Enable Tracy profiler instrumentation (implies KALMAN_PROFILING)"
-       ${KALMAN_DEFAULT_USE_TRACY})
-option(KALMAN_TRACY_ON_DEMAND
-       "Only collect Tracy data while a profiler is connected" OFF)
-set(KALMAN_TRACY_CALLSTACK
-    0
-    CACHE STRING "Default Tracy zone callstack capture depth (0 = disabled)")
-
-# Profiling build: optimized code with debug symbols for perf/callgrind/Tracy.
-# Must be set before add_subdirectory so all targets inherit the options.
-if(KALMAN_PROFILING OR KALMAN_USE_TRACY)
-  include(CheckCXXCompilerFlag)
-  check_cxx_compiler_flag("-march=native" HAS_MARCH_NATIVE)
-  if(HAS_MARCH_NATIVE)
-    add_compile_options(-O2 -g -fno-omit-frame-pointer -march=native)
-  else()
-    add_compile_options(-O2 -g -fno-omit-frame-pointer)
-  endif()
-endif()
+option(KALMAN_INSTALL
+       "Generate install/export rules for the kalman CMake package"
+       ${PROJECT_IS_TOP_LEVEL})
 
 if(KALMAN_BUILD_TESTS)
   enable_testing()
 endif()
 
-# Shared warning policy for every target.
+# Shared warning policy for every compiled target.
 function(kalman_enable_warnings target)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror
                                            ${ARGN})
@@ -65,55 +33,17 @@ endfunction()
 
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
 
-# Tracy profiler dependency. Prefer an installed Tracy (e.g. the pinned nixpkgs
-# `tracy` in the dev shell); otherwise fetch the pinned release archive so the
-# build is fully reproducible (no git / tag drift).
-if(KALMAN_USE_TRACY)
-  find_package(Tracy QUIET)
-  if(NOT Tracy_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-      tracy
-      URL https://github.com/wolfpld/tracy/archive/refs/tags/v0.13.1.tar.gz
-      URL_HASH
-        SHA256=d4efc50ebcb0bfcfdbba148995aeb75044c0d80f5d91223aebfaa8fa9e563d2b
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-    FetchContent_MakeAvailable(tracy)
-    # Tracy::TracyClient is a build-tree-only target: it cannot be referenced
-    # from an installed/exported package (see src/CMakeLists.txt).
-    set(KALMAN_TRACY_FETCHED TRUE)
-    # Tracy is not clean under the project's strict -Werror flags (inherited via
-    # CXXFLAGS) on recent compilers; relax only for Tracy.
-    if(TARGET TracyClient)
-      target_compile_options(TracyClient PRIVATE -Wno-error)
-      if(KALMAN_TRACY_ON_DEMAND)
-        target_compile_definitions(TracyClient PRIVATE TRACY_ON_DEMAND)
-      endif()
-      if(KALMAN_TRACY_CALLSTACK GREATER 0)
-        target_compile_definitions(
-          TracyClient PRIVATE TRACY_CALLSTACK=${KALMAN_TRACY_CALLSTACK})
-      endif()
-    endif()
-  endif()
-endif()
+# Header-only library: the whole public API is include/kalman/tracker.hpp.
+add_library(kalman INTERFACE)
+add_library(kalman::kalman ALIAS kalman)
 
-add_subdirectory(src)
+target_include_directories(
+  kalman INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+                   $<INSTALL_INTERFACE:include>)
+target_link_libraries(kalman INTERFACE Eigen3::Eigen)
 
-if(KALMAN_BUILD_APPS OR KALMAN_BUILD_TESTS)
-  # OpenCV is used by the video_track app and by the app unit tests.
-  find_package(
-    OpenCV 4 REQUIRED
-    COMPONENTS core
-               imgproc
-               imgcodecs
-               videoio
-               video
-               highgui
-               dnn)
-endif()
-
-if(KALMAN_BUILD_APPS)
-  add_subdirectory(apps)
+if(PROJECT_IS_TOP_LEVEL)
+  add_subdirectory(examples)
 endif()
 
 if(KALMAN_BUILD_TESTS)
@@ -121,7 +51,44 @@ if(KALMAN_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
-if(KALMAN_BUILD_BENCHMARKS)
-  find_package(benchmark 1.9 REQUIRED)
-  add_subdirectory(benchmarks)
+# ---------------------------------------------------------------------------
+# Installation / CMake package export (find_package(kalman)).
+# ---------------------------------------------------------------------------
+if(NOT KALMAN_INSTALL)
+  return()
 endif()
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+set(KALMAN_CMAKE_INSTALL_DIR
+    "${CMAKE_INSTALL_LIBDIR}/cmake/kalman"
+    CACHE STRING "Install location for kalman's CMake package files")
+
+install(TARGETS kalman EXPORT kalmanTargets)
+
+install(
+  DIRECTORY "${PROJECT_SOURCE_DIR}/include/kalman"
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  FILES_MATCHING
+  PATTERN "*.hpp")
+
+install(
+  EXPORT kalmanTargets
+  FILE kalmanTargets.cmake
+  NAMESPACE kalman::
+  DESTINATION ${KALMAN_CMAKE_INSTALL_DIR})
+
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/kalmanConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion ARCH_INDEPENDENT)
+
+file(
+  WRITE "${CMAKE_CURRENT_BINARY_DIR}/kalmanConfig.cmake"
+  "include(CMakeFindDependencyMacro)\nfind_dependency(Eigen3 3.4 NO_MODULE)\ninclude(\"\${CMAKE_CURRENT_LIST_DIR}/kalmanTargets.cmake\")\n"
+)
+
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kalmanConfig.cmake"
+              "${CMAKE_CURRENT_BINARY_DIR}/kalmanConfigVersion.cmake"
+        DESTINATION ${KALMAN_CMAKE_INSTALL_DIR})

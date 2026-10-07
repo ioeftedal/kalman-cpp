@@ -1,3 +1,0 @@
-add_executable(ukf_benchmark ukf_benchmark.cpp)
-target_link_libraries(ukf_benchmark kalman benchmark::benchmark)
-kalman_enable_warnings(ukf_benchmark)
