@@ -50,8 +50,8 @@ int main() {
   const float dt = cfg.dt;
   bool seeded = false;
 
-  std::printf("%5s %10s %10s %8s %6s   %s\n", "frame", "est_u", "est_v",
-              "err_px", "coast", "roi [u0 v0 u1 v1]");
+  std::printf("%5s %10s %10s %8s %5s %4s   %s\n", "frame", "est_u", "est_v",
+              "err_px", "coast", "acc", "roi [u0 v0 u1 v1]");
 
   for (int frame = 0; frame < 200; ++frame) {
     const float t = static_cast<float>(frame) * dt;
@@ -70,7 +70,7 @@ int main() {
                               image.y() + px_noise(rng), 5.0f};
     }
 
-    tracker.step(cam.pan, cam.tilt, det);
+    const bool accepted = tracker.step(cam.pan, cam.tilt, det);
     if (!tracker.initialized()) {
       continue;
     }
@@ -84,10 +84,10 @@ int main() {
 
     if (seeded && (frame % 20) == 0) {
       const float err = (tracker.position() - truth).norm();
-      std::printf("%5d %10.1f %10.1f %8.1f %6d   %.0f %.0f %.0f %.0f\n", frame,
-                  tracker.position().x(), tracker.position().y(), err,
-                  tracker.framesSinceUpdate(), roi.u0(), roi.v0(),
-                  roi.u0() + roi.width(), roi.v0() + roi.height());
+      std::printf("%5d %10.1f %10.1f %8.1f %4d %5d   %.0f %.0f %.0f %.0f\n",
+                  frame, tracker.position().x(), tracker.position().y(), err,
+                  tracker.framesSinceUpdate(), accepted ? 1 : 0, roi.u0(),
+                  roi.v0(), roi.u0() + roi.width(), roi.v0() + roi.height());
     }
   }
 

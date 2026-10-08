@@ -17,7 +17,8 @@ TEST(NoAlloc, HotPathIsAllocationFree) {
   cfg.pan_px_per_rad = 100.0f;
   cfg.tilt_px_per_rad = -100.0f;
   kalman::Tracker t(cfg);
-  t.reset(kalman::Detection{400.0f, 300.0f, 5.0f}, 0.0f, 0.0f);
+  static_cast<void>(
+      t.reset(kalman::Detection{400.0f, 300.0f, 5.0f}, 0.0f, 0.0f));
 
   alloc_counter::Scope scope;
   for (int k = 0; k < 2000; ++k) {

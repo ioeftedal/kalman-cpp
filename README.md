@@ -29,10 +29,12 @@ cfg.tilt_px_per_rad = -110.0f;  // sign follows your encoder convention
 kalman::Tracker tracker(cfg);
 
 tracker.reset(first_detection, pan, tilt);   // seed; pan/tilt define the frame
+                                              // false → non-finite seed rejected
 
 // once per captured frame, in capture order:
-tracker.step(pan, tilt, detection);          // std::nullopt on a detector miss
+const bool accepted = tracker.step(pan, tilt, detection);  // nullopt on a miss
 if (!accepted) { /* gated outlier — state untouched */ }
+if (tracker.lost()) { /* full-frame search until it re-seeds */ }
 
 // outputs:
 auto x  = tracker.position();                // stabilised px
@@ -49,8 +51,11 @@ A complete runnable version of the loop lives in
 **State** (stabilised pixel frame): `[u, v, vu, vv, au, av]`.
 Process model: constant acceleration with white-jerk noise (`q_jerk`).
 Measurement: `(u, v)` from your detector, linear, so the update is a closed
-form KF step (Joseph form, float, fixed-size — a few microseconds on an ARM
-core).
+form KF step (Joseph form, float, fixed-size).  Measured on the dev machine's
+x86-64 at `-O3`, `step` + `roi` + `predict` together cost roughly **0.3–0.5 µs
+per frame** — run `./build/benchmarks/hotpath_bench` on your target for your
+own number; it also prints the tracking error so a broken mock cannot flatter
+it).
 
 **Pan/tilt compensation.**  Pure rotation shifts image content by an amount
 independent of depth, so with encoder angles the camera's contribution to
@@ -72,6 +77,19 @@ positives, a bird crossing the frame — leave the state untouched and return
 `coasting()` reports the condition and the covariance (hence the ROI) grows
 until the detector recovers.
 
+**Track loss.**  After `Config::max_coast_frames` consecutive frames without
+an accepted detection (default 120 = 3 s at 40 Hz) the track is declared
+`lost()`: the coasted state is no longer worth trusting, `step()` freezes and
+only re-seeds on the next detection, and you should widen your search to
+full-frame until it arrives.  Set `max_coast_frames <= 0` to coast forever
+instead.
+
+**Bad input never reaches the state.**  `Config` is sanitised at construction
+(non-finite or out-of-range fields fall back to their defaults),
+`reset()` refuses a non-finite seed, and frames with garbage encoder angles or
+detection coordinates are dropped with the clock still advancing — a NaN
+anywhere degrades to "no information applied", never to a poisoned filter.
+
 ## Pan/tilt gains (no intrinsics required)
 
 You need one measured number per axis: pixels of image shift per radian of
@@ -86,17 +104,24 @@ Set `Config::pan_px_per_rad` / `tilt_px_per_rad`; `0` (the default) disables
 compensation.  If calibration intrinsics become available later, an exact ray
 projection can replace the small-angle model behind the same interface.
 
+Encoder angles are folded into a *continuous* axis every frame, so a gimbal
+whose absolute encoder wraps at ±π (they all do) does not inject a 2π·gain
+pixel jump into the filter at the seam — the usual way a hand-rolled
+stabiliser loses its track.  Just keep calling `step()` with the raw angles;
+the unwrap is internal.
+
 ## Tuning
 
 | Knob | Default | Meaning |
 |---|---|---|
 | `dt` | `1/40` s | Nominal frame period |
-| `q_jerk` | `2e5` px²/s⁵ | The one that matters: acceleration can change by `√(q·0.5)` px within ~0.5 s. Raise for sharper maneuvers, lower for a smoother estimate |
-| `detection_sigma` | 5 px | Assumed detector noise when `Detection::sigma ≤ 0` |
+| `q_jerk` | `2e5` px²/s⁵ | The one that matters: the acceleration can change by `√(q·T)` px/s² within `T` seconds, so `√(q·0.5) ≈ 316` px/s² over half a second. Raise for sharper maneuvers, lower for a smoother estimate |
+| `detection_sigma` | 5 px | Assumed detector noise when `Detection::sigma` is unusable (≤ 0 or non-finite) |
 | `gate_chi2` | 9.21 | Innovation gate (χ² quantile, 2 DOF) |
 | `init_pos/vel/acc_sigma` | 30 px / 500 px/s / 1500 px/s² | `reset()` priors |
 | `roi_k_sigma`, `roi_min_half_extent` | 3, 40 px | ROI = `max(k·σ, floor)` per axis — set the floor to at least your target's box size |
 | `pan/tilt_px_per_rad` | 0 | Compensation gains, above |
+| `max_coast_frames` | 120 | Misses before `lost()`; ≤ 0 disables loss detection |
 
 Pass a per-detection `sigma` (from detector confidence) whenever you have
 one: the gate and the update both use it.
@@ -104,16 +129,22 @@ one: the gate and the update both use it.
 ## Integration contract
 
 1. `reset(det, pan, tilt)` once, or just call `step()` — the first detection
-   seeds the track and sets the stabilised-frame reference.
+   seeds the track and sets the stabilised-frame reference.  `reset` returns
+   `false` (leaving the tracker untouched) if the seed or the encoder angles
+   are not finite.
 2. Every frame, in capture order: `step(pan, tilt, det)` — encoder angles from
-   *that frame's exposure*, `nullopt` when the detector misses.
+   *that frame's exposure*, `nullopt` when the detector misses.  Feed the
+   encoder every frame even on misses: the ±π unwrap needs every sample.
 3. `step` returns `true` iff a detection was accepted; a `false` return means
    gated out (or unseeded), never a crash.
 4. Build your next ROI with `roi(next_pan, next_tilt, horizon)` — pass the
    next frame's commanded/known encoder angles if the gimbal is moving, and
    `horizon = dt` (or your detector latency, if the ROI is consumed later).
-5. One `Tracker` per target; not thread-safe (one per capture thread is the
-   intended use).
+5. Check `lost()` each frame: once true, drop to a full-frame search — the
+   tracker stays frozen until the next detection re-seeds it.
+6. One `Tracker` per target; not thread-safe (one per capture thread is the
+   intended use).  The `Config` is copied and sanitised at construction;
+   build a new `Tracker` to retune.
 
 ## Using the library
 
@@ -137,14 +168,21 @@ kalman is consumed as a subproject.
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 23 tests
+ctest --test-dir build --output-on-failure   # 38 tests
 ./build/examples/track_loop                  # runnable contract demo
+./build/benchmarks/hotpath_bench             # per-frame cost on this machine
 ```
 
 The suite covers: process-model structure (F/Q, Gramian quadrature),
-convergence, Monte-Carlo NEES consistency, outlier gating, coast behaviour,
-pan/tilt compensation, latency extrapolation, ROI growth, and a
-`--wrap=malloc` allocation-freedom check on the hot path.
+convergence, Monte-Carlo NEES *and* NIS consistency, outlier gating, coast
+behaviour and track loss, pan/tilt compensation including the ±π encoder wrap
+seam, latency extrapolation, ROI growth, input validation (NaN/Inf seeds,
+encoder angles, `dt`, `Config` sanitisation), and a `--wrap=malloc`
+allocation-freedom check on the hot path.
+
+To smoke-test an install, `cmake --install` to a prefix and configure
+`tests/package_consumer/` against it with `-DCMAKE_CXX_STANDARD=14` — it must
+still compile as C++17, proving the exported target propagates `cxx_std_17`.
 
 Options: `KALMAN_BUILD_TESTS` (ON top-level, OFF as subproject),
 `KALMAN_INSTALL` (package export).
@@ -157,9 +195,11 @@ include/kalman/
   detail/
     kf.hpp                 # linear KF core: predict + gated Joseph update
     ca_model.hpp           # CA transition F(dt), white-jerk noise Q(dt, q)
-    stabilize.hpp          # pan/tilt ↔ pixel shift, reference frame
+    stabilize.hpp          # pan/tilt ↔ pixel shift, ±π encoder unwrap
 examples/track_loop.cpp     # 40 Hz loop contract demo
-tests/                      # GTest suite incl. NEES + no-alloc
+benchmarks/hotpath_bench.cpp # per-frame cost + tracking-error self-check
+tests/                      # GTest suite incl. NEES/NIS, wrap-seam, no-alloc
+tests/package_consumer/     # installed-package find_package smoke test
 ```
 
 ## References
