@@ -41,13 +41,20 @@ target_include_directories(
   kalman INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
                    $<INSTALL_INTERFACE:include>)
 target_link_libraries(kalman INTERFACE Eigen3::Eigen)
+# Public headers include <optional>: consumers must compile as C++17. Without
+# this, a C++14 consumer gets an unrelated hard error deep inside the standard
+# library instead of a clear "kalman requires cxx_std_17".
+target_compile_features(kalman INTERFACE cxx_std_17)
 
 if(PROJECT_IS_TOP_LEVEL)
   add_subdirectory(examples)
+  add_subdirectory(benchmarks)
 endif()
 
 if(KALMAN_BUILD_TESTS)
-  find_package(GTest 1.17 REQUIRED)
+  # 1.14 is what current distros ship; nothing here needs a newer gtest and
+  # requiring 1.17 would force a from-source build on Ubuntu.
+  find_package(GTest 1.14 REQUIRED)
   add_subdirectory(tests)
 endif()
 
