@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <optional>
 
 #include "helpers/alloc_counter.hpp"
@@ -21,6 +22,7 @@ TEST(NoAlloc, HotPathIsAllocationFree) {
       t.reset(kalman::Detection{400.0f, 300.0f, 5.0f}, 0.0f, 0.0f));
 
   alloc_counter::Scope scope;
+  float checksum = 0.0f;
   for (int k = 0; k < 2000; ++k) {
     const float pan = 0.002f * static_cast<float>(k);
     const float tilt = -0.001f * static_cast<float>(k);
@@ -31,12 +33,13 @@ TEST(NoAlloc, HotPathIsAllocationFree) {
                               300.0f - 0.25f * static_cast<float>(k), 5.0f};
     }
     const bool accepted = t.step(pan, tilt, det);
-    (void)accepted;
 
     const kalman::Rect r = t.roi(pan, tilt, cfg.dt);
-    (void)r;
     const kalman::PredictedState p = t.predict(0.1f);
-    (void)p;
+    checksum += r.cu + r.cv + r.width() + r.height() + p.position.sum() +
+                p.velocity.sum() + p.covariance.sum() + accepted;
   }
   EXPECT_EQ(scope.delta(), 0u);
+  EXPECT_TRUE(std::isfinite(checksum));
+  EXPECT_GT(checksum, 0.0f);
 }
