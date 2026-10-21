@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <Eigen/Cholesky>
+
 #include <cmath>
 #include <limits>
 #include <random>
@@ -693,4 +695,118 @@ TEST(Tracker, NisConsistentUnderMatchingModel) {
   // innovations (same reasoning as the NEES test above).
   const double mean_nis = nis_sum / static_cast<double>(samples);
   EXPECT_NEAR(mean_nis, 2.0, 0.3) << "samples=" << samples;
+}
+
+TEST(Tracker, MatchesDenseJosephReferenceWithVariableTimingAndNoise) {
+  using Matrix6d = Eigen::Matrix<double, 6, 6>;
+  using Vector6d = Eigen::Matrix<double, 6, 1>;
+  Eigen::Matrix<double, 2, 6> H = Eigen::Matrix<double, 2, 6>::Zero();
+  H(0, 0) = H(1, 1) = 1.0;
+  for (const float q : {0.0f, 2.0e5f}) {
+    Config cfg;
+    cfg.q_jerk = q;
+    cfg.init_pos_sigma = 7.0f;
+    cfg.init_vel_sigma = 80.0f;
+    cfg.init_acc_sigma = 300.0f;
+    cfg.roi_min_half_extent = 0.0f;
+    cfg.max_coast_frames = 0;
+    Tracker t(cfg);
+    ASSERT_TRUE(t.reset({170.0f, -80.0f, 3.0f}, 0.0f, 0.0f));
+    Vector6d x = Vector6d::Zero();
+    x.head<2>() << 170.0, -80.0;
+    Matrix6d p = Matrix6d::Zero();
+    p.diagonal() << 49.0, 49.0, 6400.0, 6400.0, 90000.0, 90000.0;
+    Noise noise(93);
+    double time = 0.0;
+    int accepted_count = 0;
+    int rejected_count = 0;
+    for (int frame = 0; frame < 500; ++frame) {
+      SCOPED_TRACE(::testing::Message() << "q=" << q << " frame=" << frame);
+      const float dt = frame % 13 == 0 ? 0.12f : 0.017f;
+      time += dt;
+      const Matrix6d F = kalman::detail::caTransition(dt).cast<double>();
+      const Matrix6d Q = kalman::detail::caNoise(dt, q).cast<double>();
+      x = F * x;
+      p = F * p * F.transpose() + Q;
+      std::optional<Detection> det;
+      bool accepted = false;
+      if (frame % 7 != 0) {
+        const float sigma = frame % 3 == 0 ? 1.5f : 8.0f;
+        det = Detection{
+            static_cast<float>(170.0 + 23.0 * time) + sigma * noise(),
+            static_cast<float>(-80.0 - 11.0 * time) + sigma * noise(), sigma};
+        if (frame % 19 == 0) {
+          det->v += 1000.0f;
+        }
+        const double r = static_cast<double>(sigma) * sigma;
+        const Eigen::Vector2d z(det->u, det->v);
+        const Eigen::Vector2d nu = z - H * x;
+        const Eigen::Matrix2d s =
+            H * p * H.transpose() + r * Eigen::Matrix2d::Identity();
+        const double nis = nu.dot(s.ldlt().solve(nu));
+        accepted = nis < cfg.gate_chi2;
+        if (accepted) {
+          const Eigen::Matrix<double, 6, 2> gain =
+              p * H.transpose() * s.ldlt().solve(Eigen::Matrix2d::Identity());
+          x += gain * nu;
+          const Matrix6d a = Matrix6d::Identity() - gain * H;
+          p = a * p * a.transpose() + r * gain * gain.transpose();
+          ++accepted_count;
+        } else {
+          ++rejected_count;
+        }
+        EXPECT_EQ(t.step(0.0f, 0.0f, det, dt), accepted);
+        EXPECT_NEAR(t.lastNis(), nis, 0.002 + 0.001 * nis);
+      } else {
+        EXPECT_FALSE(t.step(0.0f, 0.0f, std::nullopt, dt));
+      }
+      EXPECT_TRUE(t.state().cast<double>().isApprox(x, 2e-5));
+      const Matrix6d actual = t.covariance().cast<double>();
+      for (int row = 0; row < 6; ++row) {
+        for (int col = 0; col < 6; ++col) {
+          EXPECT_NEAR(actual(row, col), p(row, col),
+                      0.0002 + 0.0003 * std::abs(p(row, col)));
+        }
+      }
+      for (const float horizon : {0.0f, 0.031f, 0.4f}) {
+        const Matrix6d lead_f =
+            kalman::detail::caTransition(horizon).cast<double>();
+        const Matrix6d lead_p =
+            lead_f * p * lead_f.transpose() +
+            kalman::detail::caNoise(horizon, q).cast<double>();
+        const Vector6d lead_x = lead_f * x;
+        const auto lead = t.predict(horizon);
+        EXPECT_TRUE(
+            lead.position.cast<double>().isApprox(lead_x.head<2>(), 2e-5));
+        // Extrapolation can cancel velocity against acceleration near zero;
+        // use an absolute floor as well as a relative float tolerance.
+        EXPECT_LE((lead.velocity.cast<double>() - lead_x.segment<2>(2)).norm(),
+                  0.001 + 2e-4 * lead_x.segment<2>(2).norm());
+        EXPECT_TRUE(lead.covariance.cast<double>().isApprox(lead_p, 3e-4));
+        const auto roi = t.roi(0.0f, 0.0f, horizon);
+        EXPECT_NEAR(roi.cu, lead_x(0), 0.003);
+        EXPECT_NEAR(roi.cv, lead_x(1), 0.003);
+        EXPECT_NEAR(roi.half_w, 3.0 * std::sqrt(lead_p(0, 0)), 0.003);
+        EXPECT_NEAR(roi.half_h, 3.0 * std::sqrt(lead_p(1, 1)), 0.003);
+      }
+    }
+    EXPECT_GT(accepted_count, 300);
+    EXPECT_GT(rejected_count, 10);
+  }
+}
+
+TEST(Tracker, GateIsJointAndRejectsEquality) {
+  Config cfg;
+  cfg.q_jerk = 0.0f;
+  cfg.init_pos_sigma = cfg.init_vel_sigma = cfg.init_acc_sigma = 0.0f;
+  cfg.gate_chi2 = 5.0f;
+  Tracker t(cfg);
+  ASSERT_TRUE(t.reset({0.0f, 0.0f, 2.0f}, 0.0f, 0.0f));
+  // Each axis alone passes, but the joint NIS is exactly the threshold.
+  EXPECT_FALSE(t.step(0.0f, 0.0f, Detection{4.0f, 2.0f, 2.0f}));
+  EXPECT_FLOAT_EQ(t.lastNis(), 5.0f);
+  EXPECT_TRUE(t.state().isZero());
+  EXPECT_TRUE(t.covariance().isZero());
+  EXPECT_TRUE(t.step(0.0f, 0.0f, Detection{4.0f, 1.0f, 2.0f}));
+  EXPECT_FLOAT_EQ(t.lastNis(), 4.25f);
 }
