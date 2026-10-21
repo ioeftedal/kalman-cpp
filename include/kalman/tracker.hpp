@@ -9,7 +9,8 @@
 ///
 /// Design notes:
 ///  - Pixel measurements + constant-acceleration kinematics are *linear*, so
-///    the core is a plain 6-D linear KF (see detail/kf.hpp) — no sigma points.
+///    the core stores six state values and one packed covariance shared by
+///    the independent axes (see detail/kf.hpp) — no dense matrix hot path.
 ///  - Camera rotation is stripped at the boundary (detail/stabilize.hpp); the
 ///    state lives in a reference-stabilised frame and the filter never sees
 ///    gimbal motion.  Encoder angles are folded into a continuous axis every
@@ -43,7 +44,6 @@
 #include <limits>
 #include <optional>
 
-#include "kalman/detail/ca_model.hpp"
 #include "kalman/detail/kf.hpp"
 #include "kalman/detail/stabilize.hpp"
 
@@ -127,7 +127,6 @@ class Tracker {
   static constexpr int kMeasDim = 2;
   using Vector6 = Eigen::Matrix<float, 6, 1>;
   using Matrix6 = Eigen::Matrix<float, 6, 6>;
-  using Filter = detail::LinearFilter<kStateDim, kMeasDim>;
 
   explicit Tracker(const Config& cfg = Config())
       : cfg_(sanitize(cfg)),
@@ -148,14 +147,11 @@ class Tracker {
     const Eigen::Vector2f z = stabilizer_.toStabilized(
         Eigen::Vector2f(first.u, first.v), pan_rad, tilt_rad);
 
-    Vector6 x = Vector6::Zero();
-    x.head<2>() = z;
-    Matrix6 P = Matrix6::Zero();
-    P(0, 0) = P(1, 1) = sq(cfg_.init_pos_sigma);
-    P(2, 2) = P(3, 3) = sq(cfg_.init_vel_sigma);
-    P(4, 4) = P(5, 5) = sq(cfg_.init_acc_sigma);
-    filter_.setState(x);
-    filter_.setCovariance(P);
+    filter_.x.setZero();
+    filter_.x.head<2>() = z;
+    filter_.p = {sq(cfg_.init_pos_sigma), 0.0f, 0.0f,
+                 sq(cfg_.init_vel_sigma), 0.0f, sq(cfg_.init_acc_sigma)};
+    filter_.last_nis = 0.0f;
 
     frames_since_update_ = 0;
     initialized_ = true;
@@ -202,7 +198,7 @@ class Tracker {
     }
 
     const float h = framePeriod(dt);
-    filter_.predict(detail::caTransition(h), detail::caNoise(h, cfg_.q_jerk));
+    detail::predict(filter_, h, cfg_.q_jerk);
 
     if (!det || !encoder_ok) {
       bumpCoast();
@@ -216,7 +212,7 @@ class Tracker {
         Eigen::Vector2f(det->u, det->v), pan_rad, tilt_rad);
 
     const bool accepted =
-        filter_.updatePosition(z, sigma * sigma, cfg_.gate_chi2);
+        detail::updatePosition(filter_, z, sigma * sigma, cfg_.gate_chi2);
     if (accepted) {
       frames_since_update_ = 0;
     } else {
@@ -227,20 +223,19 @@ class Tracker {
 
   /// Smoothed position in the stabilised frame, px.
   [[nodiscard]] Eigen::Vector2f position() const noexcept {
-    return filter_.state().head<2>();
+    return filter_.x.head<2>();
   }
 
   /// Smoothed velocity in the stabilised frame, px/s.
   [[nodiscard]] Eigen::Vector2f velocity() const noexcept {
-    return filter_.state().segment<2>(2);
+    return filter_.x.segment<2>(2);
   }
 
   /// Full 6-D state `[u, v, vu, vv, au, av]` (stabilised frame).
-  [[nodiscard]] const Vector6& state() const noexcept {
-    return filter_.state();
-  }
-  [[nodiscard]] const Matrix6& covariance() const noexcept {
-    return filter_.covariance();
+  [[nodiscard]] const Vector6& state() const noexcept { return filter_.x; }
+  /// Snapshot by value: dense storage is an output format, not filter state.
+  [[nodiscard]] Matrix6 covariance() const noexcept {
+    return detail::expandCovariance(filter_.p);
   }
 
   /// Const extrapolation of the state to `t + horizon_s` — no mutation, so it
@@ -249,15 +244,13 @@ class Tracker {
   [[nodiscard]] PredictedState predict(float horizon_s) const {
     const float horizon =
         (allFinite(horizon_s) && horizon_s >= 0.0f) ? horizon_s : 0.0f;
-    const Matrix6 F = detail::caTransition(horizon);
-    const Matrix6 Q = detail::caNoise(horizon, cfg_.q_jerk);
 
     PredictedState out;
-    const Vector6 x = F * filter_.state();
-    out.position = x.head<2>();
-    out.velocity = x.segment<2>(2);
-    out.covariance = F * filter_.covariance() * F.transpose() + Q;
-    out.covariance = 0.5f * (out.covariance + out.covariance.transpose());
+    out.position = filter_.x.head<2>() + horizon * filter_.x.segment<2>(2) +
+                   (0.5f * horizon * horizon) * filter_.x.tail<2>();
+    out.velocity = filter_.x.segment<2>(2) + horizon * filter_.x.tail<2>();
+    out.covariance = detail::expandCovariance(
+        detail::predictCovariance(filter_.p, horizon, cfg_.q_jerk));
     return out;
   }
 
@@ -272,17 +265,21 @@ class Tracker {
                          float k_sigma = -1.0f) const {
     const float k =
         (allFinite(k_sigma) && k_sigma > 0.0f) ? k_sigma : cfg_.roi_k_sigma;
-    const PredictedState p = predict(horizon_s);
-    const Eigen::Vector2f c =
-        stabilizer_.toImage(p.position, pan_rad, tilt_rad);
+    const float h =
+        (allFinite(horizon_s) && horizon_s >= 0.0f) ? horizon_s : 0.0f;
+    const Eigen::Vector2f position = filter_.x.head<2>() +
+                                     h * filter_.x.segment<2>(2) +
+                                     (0.5f * h * h) * filter_.x.tail<2>();
+    const Eigen::Vector2f c = stabilizer_.toImage(position, pan_rad, tilt_rad);
+    const float variance = detail::positionVariance(filter_.p, h, cfg_.q_jerk);
+    const float extent = std::max(k * std::sqrt(std::max(variance, 0.0f)),
+                                  cfg_.roi_min_half_extent);
 
     Rect r;
     r.cu = c.x();
     r.cv = c.y();
-    r.half_w = std::max(k * std::sqrt(std::max(p.covariance(0, 0), 0.0f)),
-                        cfg_.roi_min_half_extent);
-    r.half_h = std::max(k * std::sqrt(std::max(p.covariance(1, 1), 0.0f)),
-                        cfg_.roi_min_half_extent);
+    r.half_w = extent;
+    r.half_h = extent;
     return r;
   }
 
@@ -305,7 +302,7 @@ class Tracker {
   }
   /// NIS of the most recent update attempt (accepted or gated out); 0 until
   /// the first update after a `reset()`.
-  [[nodiscard]] float lastNis() const noexcept { return filter_.lastNis(); }
+  [[nodiscard]] float lastNis() const noexcept { return filter_.last_nis; }
   [[nodiscard]] const Config& config() const noexcept { return cfg_; }
 
  private:
@@ -360,7 +357,7 @@ class Tracker {
   }
 
   Config cfg_;
-  Filter filter_;
+  detail::FilterState filter_;
   detail::Stabilizer stabilizer_;
   int frames_since_update_ = 0;
   bool initialized_ = false;
