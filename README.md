@@ -51,11 +51,10 @@ A complete runnable version of the loop lives in
 **State** (stabilised pixel frame): `[u, v, vu, vv, au, av]`.
 Process model: constant acceleration with white-jerk noise (`q_jerk`).
 Measurement: `(u, v)` from your detector, linear, so the update is a closed
-form KF step (Joseph form, float, fixed-size).  Measured on the dev machine's
-x86-64 at `-O3`, `step` + `roi` + `predict` together cost roughly **0.3–0.5 µs
-per frame** — run `./build/benchmarks/hotpath_bench` on your target for your
-own number; it also prints the tracking error so a broken mock cannot flatter
-it).
+form KF step (Joseph form, float, fixed-size). The data-oriented core stores
+only the state and the unique covariance terms; it does not construct or
+multiply dense process matrices per frame. See the design and measurements
+below; run `./build/benchmarks/hotpath_bench` on your target for your own numbers.
 
 **Pan/tilt compensation.**  Pure rotation shifts image content by an amount
 independent of depth, so with encoder angles the camera's contribution to
@@ -89,6 +88,60 @@ instead.
 `reset()` refuses a non-finite seed, and frames with garbage encoder angles or
 detection coordinates are dropped with the clock still advancing — a NaN
 anywhere degrades to "no information applied", never to a poisoned filter.
+
+## Data-oriented core
+
+The layout follows the actual workload: **one target with two independent,
+equally tuned axes**, not an arbitrary-dimensional filter or a fleet of targets.
+
+- Six adjacent state floats, paired by derivative: `[u, v, vu, vv, au, av]`.
+- One symmetric per-axis covariance stored as six floats:
+  `pp, pv, pa, vv, va, aa`. Both axes have identical priors, process noise,
+  detector variance, timing, and joint gate decisions, so their covariance
+  blocks are always identical and all cross-axis entries are zero.
+- Plain data and direct predict/update kernels. The innovation covariance is
+  `(pp + sigma²)·I₂`, so gating and gain calculation need one scalar reciprocal,
+  not a matrix factorisation. Gating remains a **joint 2-DOF** decision.
+- The covariance update retains Joseph form, expanded over the six unique
+  entries. No subtractive-update shortcut, heap traffic, runtime dispatch,
+  fast-math, or architecture-specific intrinsics.
+- `roi()` calculates only the future position and position variance, with one
+  square root for the shared extent. `predict()` and `covariance()` expand to
+  a dense matrix only because their output contract requests one.
+
+This deliberately avoids a batch/SoA framework: there is no batch in this
+library's single-target workload. Adding one would add machinery rather than
+remove work. Correlated axes or axis-specific noise would require a different
+covariance representation; they are not supported by the current model.
+
+**API migration:** `covariance()` now returns a `Matrix6` snapshot **by value**,
+not a live reference to internal storage. Use `auto p = tracker.covariance()`;
+retain that matrix before taking Eigen blocks or other lazy expressions from
+it. A saved snapshot does not change on subsequent `step()` calls. The generic
+`detail::LinearFilter<N, M>` and its `Tracker::Filter` alias have been removed.
+The normal `reset/step/position/velocity/state/predict/roi` interface is unchanged.
+
+### Performance
+
+Representative same-source before/after measurement on an AMD Ryzen 7 5800X,
+GCC 15.2, CMake Release (`-O3 -DNDEBUG`), pinned to one logical CPU:
+
+| Workload (`step` + `roi` + full `predict`) | Dense core | Packed core | Speedup |
+|---|---:|---:|---:|
+| Detection every frame | 399 ns | 57 ns | 7.0× |
+| Misses and rejected outliers | 378 ns | 55 ns | 6.9× |
+| Prediction-only coasting | 261 ns | 43 ns | 6.1× |
+| `sizeof(Tracker)` | 272 bytes | 132 bytes | 51% smaller |
+
+Each timing is the median of 15 batches of 10,000 frames after warmup. Inputs
+are precomputed outside timing, identical between batches, and generated
+independently of the estimate. A compiler barrier consumes complete prediction
+and ROI outputs, including covariance. Accepted counts and final tracking error
+are also checked: both cores accepted 10,000/10,000 tracked detections and
+8,294/10,000 mixed detections, with final errors of 0.015 px and 0.020 px.
+The coast case disables loss detection to measure prediction, not the frozen
+lost-track shortcut. These are CPU microbenchmarks, not detector/pipeline
+latency promises; rerun on the deployment hardware (especially ARM).
 
 ## Pan/tilt gains (no intrinsics required)
 
@@ -168,7 +221,7 @@ kalman is consumed as a subproject.
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # 38 tests
+ctest --test-dir build --output-on-failure   # 40 tests
 ./build/examples/track_loop                  # runnable contract demo
 ./build/benchmarks/hotpath_bench             # per-frame cost on this machine
 ```
@@ -177,8 +230,10 @@ The suite covers: process-model structure (F/Q, Gramian quadrature),
 convergence, Monte-Carlo NEES *and* NIS consistency, outlier gating, coast
 behaviour and track loss, pan/tilt compensation including the ±π encoder wrap
 seam, latency extrapolation, ROI growth, input validation (NaN/Inf seeds,
-encoder angles, `dt`, `Config` sanitisation), and a `--wrap=malloc`
-allocation-freedom check on the hot path.
+encoder angles, `dt`, `Config` sanitisation), comparison against a dense
+double-precision Joseph reference with varying timing/noise and zero jerk,
+the joint gate boundary, and a `--wrap=malloc` allocation-freedom check on
+the hot path (with prediction and ROI outputs consumed).
 
 To smoke-test an install, `cmake --install` to a prefix and configure
 `tests/package_consumer/` against it with `-DCMAKE_CXX_STANDARD=14` — it must
@@ -193,8 +248,8 @@ Options: `KALMAN_BUILD_TESTS` (ON top-level, OFF as subproject),
 include/kalman/
   tracker.hpp              # the entire public API: Config, Detection, Tracker
   detail/
-    kf.hpp                 # linear KF core: predict + gated Joseph update
-    ca_model.hpp           # CA transition F(dt), white-jerk noise Q(dt, q)
+    kf.hpp                 # packed filter data + direct CA/Joseph kernels
+    ca_model.hpp           # analytic F/Q matrices for reference and validation
     stabilize.hpp          # pan/tilt ↔ pixel shift, ±π encoder unwrap
 examples/track_loop.cpp     # 40 Hz loop contract demo
 benchmarks/hotpath_bench.cpp # per-frame cost + tracking-error self-check
